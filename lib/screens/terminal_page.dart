@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:developer' as developer;
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
@@ -58,7 +59,6 @@ class _TerminalPageState extends State<TerminalPage> {
   }
 
   Future<void> _start() async {
-    _terminal.write('Connecting to ${widget.connection.host}…\r\n');
     try {
       final creds = await _secrets.load(widget.connection.id);
       if (creds == null) {
@@ -67,6 +67,7 @@ class _TerminalPageState extends State<TerminalPage> {
       final bundle = await _connector.connect(
         target: widget.connection,
         targetCreds: creds,
+        onProgress: (line) => _terminal.write('$line\r\n'),
       );
       _bundle = bundle;
 
@@ -107,7 +108,13 @@ class _TerminalPageState extends State<TerminalPage> {
         _status = 'Connected';
         _connected = true;
       });
-    } catch (e) {
+    } catch (e, st) {
+      developer.log(
+        'connect failed',
+        name: 'andssh',
+        error: e,
+        stackTrace: st,
+      );
       if (!mounted) return;
       setState(() {
         _status = 'Failed: $e';

@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:developer' as developer;
 
 import 'package:dartssh2/dartssh2.dart';
 
 import '../models/ssh_connection.dart';
 import 'connection_store.dart';
 import 'secret_store.dart';
+
+void _log(String msg) => developer.log(msg, name: 'andssh');
 
 /// Opens an [SSHClient] for [target], following its jump host chain.
 ///
@@ -24,18 +27,36 @@ class SshConnector {
   Future<SshClientBundle> connect({
     required SshConnection target,
     required SshCredentials targetCreds,
+    void Function(String line)? onProgress,
   }) async {
+    void progress(String line) {
+      _log(line);
+      onProgress?.call(line);
+    }
+
     final chain = _store.resolveJumpChain(target);
     // chain[0] = target, chain[last] = outermost jump host.
     final hops = chain.reversed.toList();
+    if (hops.length > 1) {
+      final chainStr = hops
+          .map((h) => '${h.username}@${h.host}:${h.port}')
+          .join(' → ');
+      progress('Chain: $chainStr');
+    }
 
     final clients = <SSHClient>[];
+    progress('[1/${hops.length}] TCP connect to '
+        '${hops.first.host}:${hops.first.port}…');
     SSHSocket socket =
         await SSHSocket.connect(hops.first.host, hops.first.port);
 
     for (var i = 0; i < hops.length; i++) {
       final hop = hops[i];
+      final step = i + 1;
       final isTarget = i == hops.length - 1;
+      final role = isTarget ? 'target' : 'jump host';
+      progress('[$step/${hops.length}] Authenticating to $role '
+          '${hop.username}@${hop.host} (${hop.authMethod.name})…');
       final creds = isTarget
           ? targetCreds
           : (await _secrets.loadUnlocked(hop.id)) ??
@@ -55,13 +76,28 @@ class SshConnector {
         onPasswordRequest: hop.authMethod == SshAuthMethod.password
             ? () => creds.password ?? ''
             : null,
+        printDebug: (m) => _log('[${hop.name}] $m'),
       );
-      await client.authenticated;
+      try {
+        await client.authenticated;
+      } catch (e, st) {
+        progress('    ✗ auth failed: $e');
+        _log('$st');
+        rethrow;
+      }
+      progress('    ✓ authenticated');
       clients.add(client);
 
       if (!isTarget) {
         final next = hops[i + 1];
-        socket = await client.forwardLocal(next.host, next.port);
+        progress('    → tunnelling to ${next.host}:${next.port}');
+        try {
+          socket = await client.forwardLocal(next.host, next.port);
+        } catch (e, st) {
+          progress('    ✗ tunnel failed: $e');
+          _log('$st');
+          rethrow;
+        }
       }
     }
 

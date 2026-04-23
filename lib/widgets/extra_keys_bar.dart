@@ -28,15 +28,20 @@ class ExtraKeysBar extends StatelessWidget {
               height: 44,
               child: ListView(
                 scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 2),
                 children: [
+                  _key('↑', () => controller.sendKey(TerminalKey.arrowUp)),
+                  _key('↓', () => controller.sendKey(TerminalKey.arrowDown)),
+                  _key('←', () => controller.sendKey(TerminalKey.arrowLeft)),
+                  _key('→', () => controller.sendKey(TerminalKey.arrowRight)),
+                  const SizedBox(width: 4),
                   _toggle('Ctrl', controller.ctrl,
                       () => controller.toggleCtrl()),
                   _toggle(
                       'Alt', controller.alt, () => controller.toggleAlt()),
                   _toggle('Shift', controller.shift,
                       () => controller.toggleShift()),
-                  const SizedBox(width: 8),
+                  const SizedBox(width: 4),
                   _key('Esc', () => controller.sendKey(TerminalKey.escape)),
                   _key('Tab', () => controller.sendKey(TerminalKey.tab)),
                   _key('|', () => controller.sendText('|')),
@@ -45,12 +50,7 @@ class ExtraKeysBar extends StatelessWidget {
                   _key('~', () => controller.sendText('~')),
                   _key('-', () => controller.sendText('-')),
                   _key('_', () => controller.sendText('_')),
-                  const SizedBox(width: 8),
-                  _key('←', () => controller.sendKey(TerminalKey.arrowLeft)),
-                  _key('↓', () => controller.sendKey(TerminalKey.arrowDown)),
-                  _key('↑', () => controller.sendKey(TerminalKey.arrowUp)),
-                  _key('→', () => controller.sendKey(TerminalKey.arrowRight)),
-                  const SizedBox(width: 8),
+                  const SizedBox(width: 4),
                   _key('Home', () => controller.sendKey(TerminalKey.home)),
                   _key('End', () => controller.sendKey(TerminalKey.end)),
                   _key('PgUp', () => controller.sendKey(TerminalKey.pageUp)),
@@ -58,7 +58,7 @@ class ExtraKeysBar extends StatelessWidget {
                       () => controller.sendKey(TerminalKey.pageDown)),
                   _key('Ins', () => controller.sendKey(TerminalKey.insert)),
                   _key('Del', () => controller.sendKey(TerminalKey.delete)),
-                  const SizedBox(width: 8),
+                  const SizedBox(width: 4),
                   for (int i = 1; i <= 12; i++)
                     _key('F$i', () => controller.sendFKey(i)),
                 ],
@@ -72,22 +72,26 @@ class ExtraKeysBar extends StatelessWidget {
 
   Widget _toggle(String label, bool active, VoidCallback onTap) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 1, vertical: 4),
       child: FilterChip(
         label: Text(label),
         selected: active,
         onSelected: (_) => onTap(),
+        visualDensity: VisualDensity.compact,
+        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
       ),
     );
   }
 
   Widget _key(String label, VoidCallback onTap) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 1, vertical: 4),
       child: OutlinedButton(
         style: OutlinedButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 6),
           minimumSize: const Size(0, 36),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          visualDensity: VisualDensity.compact,
         ),
         onPressed: onTap,
         child: Text(label),

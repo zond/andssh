@@ -38,6 +38,7 @@ class TerminalView extends StatefulWidget {
     this.onTapUp,
     this.onSecondaryTapDown,
     this.onSecondaryTapUp,
+    this.onLongPressTap,
     this.mouseCursor = SystemMouseCursors.text,
     this.keyboardType = TextInputType.emailAddress,
     this.keyboardAppearance = Brightness.dark,
@@ -49,6 +50,7 @@ class TerminalView extends StatefulWidget {
     this.readOnly = false,
     this.hardwareKeyboardOnly = false,
     this.simulateScroll = true,
+    this.handleAltBufferTouchScroll = true,
   });
 
   /// The underlying terminal that this widget renders.
@@ -90,6 +92,12 @@ class TerminalView extends StatefulWidget {
 
   /// Function called when the user taps on the terminal with a secondary
   /// button.
+  /// andssh P3: fires when a long-press completes without drag
+  /// movement, i.e. the user held their finger still and released.
+  /// Useful for showing a Paste / context menu. Long-press *with*
+  /// drag continues to build up a selection as before.
+  final void Function(LongPressStartDetails, CellOffset)? onLongPressTap;
+
   final void Function(TapDownDetails, CellOffset)? onSecondaryTapDown;
 
   /// Function called when the user stops holding down a secondary button.
@@ -141,6 +149,13 @@ class TerminalView extends StatefulWidget {
   /// keys to the application. This is standard behavior for most terminal
   /// emulators. True by default.
   final bool simulateScroll;
+
+  /// andssh P4: if false, disables xterm's internal alt-buffer
+  /// [InfiniteScrollView] wrapper. Use when the caller emits mouse-
+  /// wheel events from touch themselves — otherwise the extra Scrollable
+  /// wins touch drag from long-press and text selection breaks inside
+  /// tmux / vim / less.
+  final bool handleAltBufferTouchScroll;
 
   @override
   State<TerminalView> createState() => TerminalViewState();
@@ -244,6 +259,7 @@ class TerminalViewState extends State<TerminalView> {
     child = TerminalScrollGestureHandler(
       terminal: widget.terminal,
       simulateScroll: widget.simulateScroll,
+      handleAltBufferTouchScroll: widget.handleAltBufferTouchScroll,
       getCellOffset: (offset) => renderTerminal.getCellOffset(offset),
       getLineHeight: () => renderTerminal.lineHeight,
       child: child,
@@ -305,6 +321,8 @@ class TerminalViewState extends State<TerminalView> {
           widget.onSecondaryTapDown != null ? _onSecondaryTapDown : null,
       onSecondaryTapUp:
           widget.onSecondaryTapUp != null ? _onSecondaryTapUp : null,
+      onLongPressTap:
+          widget.onLongPressTap != null ? _onLongPressTap : null,
       readOnly: widget.readOnly,
       child: child,
     );
@@ -365,6 +383,11 @@ class TerminalViewState extends State<TerminalView> {
   void _onSecondaryTapUp(TapUpDetails details) {
     final offset = renderTerminal.getCellOffset(details.localPosition);
     widget.onSecondaryTapUp?.call(details, offset);
+  }
+
+  void _onLongPressTap(LongPressStartDetails details) {
+    final offset = renderTerminal.getCellOffset(details.localPosition);
+    widget.onLongPressTap?.call(details, offset);
   }
 
   bool get hasInputConnection {

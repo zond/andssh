@@ -13,6 +13,7 @@ class TerminalScrollGestureHandler extends StatefulWidget {
     required this.getCellOffset,
     required this.getLineHeight,
     this.simulateScroll = true,
+    this.handleAltBufferTouchScroll = true,
     required this.child,
   });
 
@@ -28,6 +29,15 @@ class TerminalScrollGestureHandler extends StatefulWidget {
   /// doesn't declare it supports mouse wheel events. true by default as it
   /// is the default behavior of most terminals.
   final bool simulateScroll;
+
+  /// andssh P4: whether to install the alt-buffer [InfiniteScrollView]
+  /// that translates touch drag → scroll → wheel events. When the caller
+  /// already emits wheel events themselves (as andssh does via its own
+  /// [Listener]) this extra Scrollable only steals the drag gesture
+  /// from the long-press recognizer, breaking text selection inside
+  /// tmux / less / vim. Setting this to false keeps only the main
+  /// scrollback Scrollable, which doesn't have that problem.
+  final bool handleAltBufferTouchScroll;
 
   final Widget child;
 
@@ -113,7 +123,7 @@ class _TerminalScrollGestureHandlerState
 
   @override
   Widget build(BuildContext context) {
-    if (!isAltBuffer) {
+    if (!isAltBuffer || !widget.handleAltBufferTouchScroll) {
       return widget.child;
     }
 

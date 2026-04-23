@@ -3,6 +3,7 @@ import 'dart:developer' as developer;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:xterm/xterm.dart';
 
@@ -24,6 +25,7 @@ class TerminalPage extends StatefulWidget {
 
 class _TerminalPageState extends State<TerminalPage> {
   final TerminalController _termCtrl = TerminalController();
+  final GlobalKey<TerminalViewState> _viewKey = GlobalKey();
 
   // One-shot Terminal used only to show progress / error text before the
   // real session attaches. Once [_session] is set, [_session.terminal]
@@ -52,6 +54,13 @@ class _TerminalPageState extends State<TerminalPage> {
   void initState() {
     super.initState();
     _title = widget.connection.name;
+    // Rebuild when a selection appears / disappears so the Copy icon
+    // and ongoing-selection highlight show/hide in the app bar.
+    _termCtrl.addListener(_onSelectionChanged);
+  }
+
+  void _onSelectionChanged() {
+    if (mounted) setState(() {});
   }
 
   @override
@@ -115,10 +124,44 @@ class _TerminalPageState extends State<TerminalPage> {
     );
   }
 
+  Future<void> _copySelection() async {
+    final terminal = _session?.terminal;
+    if (terminal == null) return;
+    final sel = _termCtrl.selection;
+    if (sel == null) return;
+    final text = terminal.buffer.getText(sel);
+    if (text.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: text));
+    _termCtrl.clearSelection();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Copied ${text.length} character'
+            '${text.length == 1 ? '' : 's'}'),
+        duration: const Duration(seconds: 1),
+      ),
+    );
+  }
+
+  Future<void> _paste() async {
+    final terminal = _session?.terminal;
+    if (terminal == null) return;
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text;
+    if (text == null || text.isEmpty) return;
+    terminal.paste(text);
+  }
+
+  void _clearSelection() {
+    _termCtrl.clearSelection();
+  }
+
+
   @override
   void dispose() {
     // Intentionally does NOT close the session — the SessionManager owns
     // it. The user goes back, the connection stays alive.
+    _termCtrl.removeListener(_onSelectionChanged);
     _termCtrl.dispose();
     super.dispose();
   }
@@ -138,6 +181,10 @@ class _TerminalPageState extends State<TerminalPage> {
     // events. In plain shell, let xterm's native Scrollable scroll the
     // local scrollback.
     if (!_reportsMouse) return;
+    // Don't emit wheel events while the user is actively long-press-
+    // dragging to extend a local selection — wheel events would fight
+    // with xterm's selectCharacters path and disorient them.
+    if (_termCtrl.selection != null) return;
     _scrollAccum += event.delta.dy;
     while (_scrollAccum.abs() >= _wheelStep) {
       final isWheelUp = _scrollAccum > 0;
@@ -150,6 +197,60 @@ class _TerminalPageState extends State<TerminalPage> {
         const CellOffset(0, 0),
       );
     }
+  }
+
+  // Build the native Android text-selection toolbar positioned above
+  // the current selection. Shown only while [_termCtrl.selection] is
+  // non-null.
+  Widget _buildSelectionToolbar() {
+    final selection = _termCtrl.selection;
+    if (selection == null) return const SizedBox.shrink();
+    final state = _viewKey.currentState;
+    final render = state?.renderTerminal;
+    final viewBox = _viewKey.currentContext?.findRenderObject() as RenderBox?;
+    // Defaults for when the terminal hasn't laid out yet: anchor at the
+    // top-center of the screen.
+    final mq = MediaQuery.of(context);
+    var primary = Offset(mq.size.width / 2, mq.padding.top + kToolbarHeight);
+    var secondary = primary;
+    if (render != null && viewBox != null && viewBox.hasSize) {
+      final begin = render.getOffset(selection.begin);
+      final end = render.getOffset(selection.end);
+      final topLeft = viewBox.localToGlobal(begin);
+      final bottomRight =
+          viewBox.localToGlobal(end + Offset(0, render.lineHeight));
+      primary = Offset(
+        (topLeft.dx + bottomRight.dx) / 2,
+        topLeft.dy,
+      );
+      secondary = Offset(
+        (topLeft.dx + bottomRight.dx) / 2,
+        bottomRight.dy,
+      );
+    }
+    return AdaptiveTextSelectionToolbar.buttonItems(
+      anchors: TextSelectionToolbarAnchors(
+        primaryAnchor: primary,
+        secondaryAnchor: secondary,
+      ),
+      buttonItems: [
+        ContextMenuButtonItem(
+          label: 'Copy',
+          onPressed: _copySelection,
+        ),
+        ContextMenuButtonItem(
+          label: 'Paste',
+          onPressed: () {
+            _clearSelection();
+            _paste();
+          },
+        ),
+        ContextMenuButtonItem(
+          label: 'Cancel',
+          onPressed: _clearSelection,
+        ),
+      ],
+    );
   }
 
   // Compute the terminal text style so a requested column count fits the
@@ -192,6 +293,9 @@ class _TerminalPageState extends State<TerminalPage> {
             icon: const Icon(Icons.menu),
             onSelected: (a) {
               switch (a) {
+                case _MenuAction.paste:
+                  _paste();
+                  break;
                 case _MenuAction.settings:
                   _openSettings();
                   break;
@@ -201,6 +305,14 @@ class _TerminalPageState extends State<TerminalPage> {
               }
             },
             itemBuilder: (_) => [
+              if (session != null)
+                const PopupMenuItem(
+                  value: _MenuAction.paste,
+                  child: ListTile(
+                    leading: Icon(Icons.content_paste),
+                    title: Text('Paste'),
+                  ),
+                ),
               const PopupMenuItem(
                 value: _MenuAction.settings,
                 child: ListTile(
@@ -235,35 +347,46 @@ class _TerminalPageState extends State<TerminalPage> {
                 ),
               ),
       ),
-      body: Column(
+      body: Stack(
         children: [
-          Expanded(
-            child: Listener(
-              onPointerMove: _onPointerMove,
-              onPointerUp: (_) => _scrollAccum = 0,
-              onPointerCancel: (_) => _scrollAccum = 0,
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  final style = _styleFor(constraints.maxWidth, prefs);
-                  return TerminalView(
-                    terminal,
-                    controller: _termCtrl,
-                    autofocus: true,
-                    backgroundOpacity: 1,
-                    padding: const EdgeInsets.all(4),
-                    deleteDetection: true,
-                    simulateScroll: true,
-                    textStyle: style,
-                  );
-                },
+          Column(
+            children: [
+              Expanded(
+                child: Listener(
+                  onPointerMove: _onPointerMove,
+                  onPointerUp: (_) => _scrollAccum = 0,
+                  onPointerCancel: (_) => _scrollAccum = 0,
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final style = _styleFor(constraints.maxWidth, prefs);
+                      return TerminalView(
+                        terminal,
+                        key: _viewKey,
+                        controller: _termCtrl,
+                        autofocus: true,
+                        backgroundOpacity: 1,
+                        padding: const EdgeInsets.all(4),
+                        deleteDetection: true,
+                        simulateScroll: true,
+                        // We emit wheel events for touch ourselves (see
+                        // _onPointerMove); disabling xterm's alt-buffer
+                        // Scrollable wrapper lets long-press-drag still
+                        // select inside tmux / vim / less.
+                        handleAltBufferTouchScroll: false,
+                        textStyle: style,
+                      );
+                    },
+                  ),
+                ),
               ),
-            ),
+              if (keys != null) ExtraKeysBar(controller: keys),
+            ],
           ),
-          if (keys != null) ExtraKeysBar(controller: keys),
+          if (_termCtrl.selection != null) _buildSelectionToolbar(),
         ],
       ),
     );
   }
 }
 
-enum _MenuAction { settings, disconnect }
+enum _MenuAction { paste, settings, disconnect }

@@ -1,4 +1,8 @@
 export 'src/terminal_view.dart';
+// andssh P2: expose RenderTerminal so we can compute the on-screen
+// position of a selection for the native AdaptiveTextSelectionToolbar
+// anchor.
+export 'src/ui/render.dart' show RenderTerminal;
 export 'src/ui/controller.dart';
 export 'src/ui/cursor_type.dart';
 export 'src/ui/keyboard_visibility.dart';

@@ -21,6 +21,7 @@ class TerminalGestureHandler extends StatefulWidget {
     this.onSecondaryTapUp,
     this.onTertiaryTapDown,
     this.onTertiaryTapUp,
+    this.onLongPressTap,
     this.readOnly = false,
   });
 
@@ -44,6 +45,12 @@ class TerminalGestureHandler extends StatefulWidget {
 
   final GestureTapUpCallback? onTertiaryTapUp;
 
+  /// andssh P3: called when a long-press completes without any drag
+  /// movement — i.e. the user held a finger still, then released. Lets
+  /// the caller show a Paste / context menu, while the same gesture's
+  /// drag path still produces a word/character selection.
+  final GestureLongPressStartCallback? onLongPressTap;
+
   final bool readOnly;
 
   @override
@@ -59,6 +66,11 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
 
   LongPressStartDetails? _lastLongPressStartDetails;
 
+  // andssh P3: track whether the current long-press saw any drag
+  // movement, so we can tell a "bare long-press tap" (paste menu
+  // trigger) from a selection extension.
+  bool _longPressMoved = false;
+
   @override
   Widget build(BuildContext context) {
     return TerminalGestureDetector(
@@ -72,7 +84,7 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
       onTertiaryTapUp: onSecondaryTapUp,
       onLongPressStart: onLongPressStart,
       onLongPressMoveUpdate: onLongPressMoveUpdate,
-      // onLongPressUp: onLongPressUp,
+      onLongPressUp: onLongPressUp,
       onDragStart: onDragStart,
       onDragUpdate: onDragUpdate,
       onDoubleTapDown: onDoubleTapDown,
@@ -160,19 +172,29 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
     renderTerminal.selectWord(details.localPosition);
   }
 
+  // andssh P3: defer selection until we see any drag movement.  A
+  // "bare" long-press (finger held still, then released) fires
+  // [widget.onLongPressTap] instead so the caller can show a Paste
+  // menu. Matches how Android text fields treat long-press-on-blank.
   void onLongPressStart(LongPressStartDetails details) {
     _lastLongPressStartDetails = details;
-    renderTerminal.selectWord(details.localPosition);
+    _longPressMoved = false;
   }
 
   void onLongPressMoveUpdate(LongPressMoveUpdateDetails details) {
+    _longPressMoved = true;
     renderTerminal.selectWord(
       _lastLongPressStartDetails!.localPosition,
       details.localPosition,
     );
   }
 
-  // void onLongPressUp() {}
+  void onLongPressUp() {
+    final start = _lastLongPressStartDetails;
+    if (start != null && !_longPressMoved) {
+      widget.onLongPressTap?.call(start);
+    }
+  }
 
   void onDragStart(DragStartDetails details) {
     _lastDragStartDetails = details;

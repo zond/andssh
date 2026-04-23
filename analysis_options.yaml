@@ -9,6 +9,13 @@
 # packages, and plugins designed to encourage good coding practices.
 include: package:flutter_lints/flutter.yaml
 
+analyzer:
+  exclude:
+    # Vendored third-party code — upstream's own style/deprecation
+    # warnings aren't ours to fix. See packages/xterm/PATCHES.md for
+    # the local patches we DO apply.
+    - packages/xterm/**
+
 linter:
   # The lint rules applied to this project can be customized in the
   # section below to disable rules from the `package:flutter_lints/flutter.yaml`

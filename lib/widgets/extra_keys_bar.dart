@@ -30,10 +30,13 @@ class ExtraKeysBar extends StatelessWidget {
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.symmetric(horizontal: 2),
                 children: [
-                  _key('↑', () => controller.sendKey(TerminalKey.arrowUp)),
-                  _key('↓', () => controller.sendKey(TerminalKey.arrowDown)),
-                  _key('←', () => controller.sendKey(TerminalKey.arrowLeft)),
-                  _key('→', () => controller.sendKey(TerminalKey.arrowRight)),
+                  _arrow('↑', () => controller.sendKey(TerminalKey.arrowUp)),
+                  _arrow(
+                      '↓', () => controller.sendKey(TerminalKey.arrowDown)),
+                  _arrow(
+                      '←', () => controller.sendKey(TerminalKey.arrowLeft)),
+                  _arrow(
+                      '→', () => controller.sendKey(TerminalKey.arrowRight)),
                   const SizedBox(width: 4),
                   _toggle('Ctrl', controller.ctrl,
                       () => controller.toggleCtrl()),
@@ -89,7 +92,28 @@ class ExtraKeysBar extends StatelessWidget {
       child: OutlinedButton(
         style: OutlinedButton.styleFrom(
           padding: const EdgeInsets.symmetric(horizontal: 6),
-          minimumSize: const Size(0, 36),
+          // Square-minimum so single-character buttons like "|" or "/"
+          // get a finger-friendly hit area, while longer labels expand
+          // horizontally as needed.
+          minimumSize: const Size(36, 36),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          visualDensity: VisualDensity.compact,
+        ),
+        onPressed: onTap,
+        child: Text(label),
+      ),
+    );
+  }
+
+  Widget _arrow(String label, VoidCallback onTap) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 1, vertical: 4),
+      child: OutlinedButton(
+        style: OutlinedButton.styleFrom(
+          shape: const CircleBorder(),
+          padding: EdgeInsets.zero,
+          fixedSize: const Size(36, 36),
+          minimumSize: const Size(36, 36),
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
           visualDensity: VisualDensity.compact,
         ),

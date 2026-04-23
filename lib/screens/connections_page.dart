@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../models/ssh_connection.dart';
 import '../services/connection_store.dart';
+import '../services/session_manager.dart';
 import 'connection_form_page.dart';
 import 'terminal_page.dart';
 
@@ -12,6 +13,7 @@ class ConnectionsPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final store = context.watch<ConnectionStore>();
+    final sessions = context.watch<SessionManager>();
     return Scaffold(
       appBar: AppBar(title: const Text('andssh')),
       body: !store.isLoaded
@@ -26,28 +28,39 @@ class ConnectionsPage extends StatelessWidget {
                     final jump = c.jumpHostId == null
                         ? null
                         : store.byId(c.jumpHostId!);
+                    final active = sessions.hasSession(c.id);
                     return ListTile(
-                      leading: const Icon(Icons.terminal),
+                      leading: Icon(
+                        active ? Icons.circle : Icons.terminal,
+                        color: active ? Colors.greenAccent : null,
+                        size: active ? 14 : null,
+                      ),
                       title: Text(c.name),
                       subtitle: Text(
                         '${c.username}@${c.host}:${c.port}'
-                        '${jump == null ? '' : '  (via ${jump.name})'}',
+                        '${jump == null ? '' : '  (via ${jump.name})'}'
+                        '${active ? '  • connected' : ''}',
                       ),
                       trailing: PopupMenuButton<_Action>(
                         onSelected: (a) => _handleAction(context, c, a),
-                        itemBuilder: (_) => const [
-                          PopupMenuItem(
+                        itemBuilder: (_) => [
+                          const PopupMenuItem(
                             value: _Action.edit,
                             child: Text('Edit'),
                           ),
-                          PopupMenuItem(
+                          if (active)
+                            const PopupMenuItem(
+                              value: _Action.disconnect,
+                              child: Text('Disconnect'),
+                            ),
+                          const PopupMenuItem(
                             value: _Action.delete,
                             child: Text('Delete'),
                           ),
                         ],
                       ),
                       onTap: () => Navigator.of(context).push(
-                        MaterialPageRoute(
+                        MaterialPageRoute<void>(
                           builder: (_) => TerminalPage(connection: c),
                         ),
                       ),
@@ -71,13 +84,17 @@ class ConnectionsPage extends StatelessWidget {
     _Action a,
   ) async {
     final store = context.read<ConnectionStore>();
+    final sessions = context.read<SessionManager>();
     switch (a) {
       case _Action.edit:
         await Navigator.of(context).push(
-          MaterialPageRoute(
+          MaterialPageRoute<void>(
             builder: (_) => ConnectionFormPage(existing: c),
           ),
         );
+        break;
+      case _Action.disconnect:
+        await sessions.disconnect(c.id);
         break;
       case _Action.delete:
         final ok = await showDialog<bool>(
@@ -98,13 +115,16 @@ class ConnectionsPage extends StatelessWidget {
             ],
           ),
         );
-        if (ok == true) await store.delete(c.id);
+        if (ok == true) {
+          await sessions.disconnect(c.id);
+          await store.delete(c.id);
+        }
         break;
     }
   }
 }
 
-enum _Action { edit, delete }
+enum _Action { edit, disconnect, delete }
 
 class _Empty extends StatelessWidget {
   const _Empty();

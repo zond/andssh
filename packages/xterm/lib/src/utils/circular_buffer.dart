@@ -38,6 +38,25 @@ class IndexAwareCircularBuffer<T extends IndexedItem> {
   @pragma('vm:prefer-inline')
   void _adoptChild(int index, T child) {
     final cyclicIndex = _getCyclicIndex(index);
+    // andssh P11: if [child] is already stored in this buffer at a
+    // different position (callers sometimes alias, e.g. scrollDown does
+    // `this.lines[i] = this.lines[i - n]`), null out its old slot before
+    // attaching at the new one. Otherwise, when a later iteration of the
+    // caller's loop overwrites the old slot, `_adoptChild` there will
+    // call `_detach()` on the SHARED line — leaving it in the array at
+    // the new slot with `_owner = null`. Any anchors subsequently
+    // created on that slot are born detached, which silently breaks
+    // `TerminalController.selection` (it returns null when anchors are
+    // not attached).
+    if (child._owner == this) {
+      final oldIdx = child._absoluteIndex! - _absoluteStartIndex;
+      if (oldIdx >= 0 && oldIdx < _length) {
+        final oldCyclicIndex = _getCyclicIndex(oldIdx);
+        if (oldCyclicIndex != cyclicIndex) {
+          _array[oldCyclicIndex] = null;
+        }
+      }
+    }
     _array[cyclicIndex]?._detach();
     _array[cyclicIndex] = child.._attach(this, index);
   }

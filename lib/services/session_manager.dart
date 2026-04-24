@@ -37,6 +37,27 @@ class ActiveSession {
   final StreamSubscription<String> stderrSub;
   final StreamSubscription<void> doneSub;
 
+  bool _frozen = false;
+
+  /// Pause SSH stdout/stderr delivery to the terminal. Idempotent — calling
+  /// it multiple times has the same effect as calling it once, so a second
+  /// long-press before the first was dismissed cannot accumulate extra pause
+  /// counts that a single [unfreeze] cannot cancel.
+  void freeze() {
+    if (_frozen) return;
+    stdoutSub.pause();
+    stderrSub.pause();
+    _frozen = true;
+  }
+
+  /// Resume SSH data delivery after a [freeze]. Idempotent.
+  void unfreeze() {
+    if (!_frozen) return;
+    stdoutSub.resume();
+    stderrSub.resume();
+    _frozen = false;
+  }
+
   Future<void> close() async {
     await stdoutSub.cancel();
     await stderrSub.cancel();

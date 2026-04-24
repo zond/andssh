@@ -21,7 +21,9 @@ class TerminalGestureHandler extends StatefulWidget {
     this.onSecondaryTapUp,
     this.onTertiaryTapDown,
     this.onTertiaryTapUp,
+    this.onLongPressStart,
     this.onLongPressTap,
+    this.suppressInternalSelectionGestures = false,
     this.readOnly = false,
   });
 
@@ -45,11 +47,28 @@ class TerminalGestureHandler extends StatefulWidget {
 
   final GestureTapUpCallback? onTertiaryTapUp;
 
+  /// andssh P8: called at the moment the long-press is recognised (before
+  /// any selection is attempted). Use to freeze SSH data writes so that
+  /// the terminal buffer is stable while xterm builds its CellAnchors —
+  /// without this, tmux redraws can detach anchors before selectWord
+  /// returns, silently breaking selection.
+  final GestureLongPressStartCallback? onLongPressStart;
+
   /// andssh P3: called when a long-press completes without any drag
   /// movement — i.e. the user held a finger still, then released. Lets
   /// the caller show a Paste / context menu, while the same gesture's
   /// drag path still produces a word/character selection.
   final GestureLongPressStartCallback? onLongPressTap;
+
+  /// andssh P6: when true, xterm's built-in long-press / drag / double-
+  /// tap selection handlers do NOT call [renderTerminal.selectWord] /
+  /// [selectCharacters]. Use when the terminal is wrapped in a Flutter
+  /// `SelectionArea` so the framework's own gesture recognizers drive
+  /// selection via `SelectionContainerDelegate.dispatchSelectionEvent`
+  /// instead. Otherwise xterm's recognizers win the gesture arena and
+  /// the framework never sees the events — which means no teardrop
+  /// handles and no adaptive selection toolbar.
+  final bool suppressInternalSelectionGestures;
 
   final bool readOnly;
 
@@ -88,6 +107,10 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
       onDragStart: onDragStart,
       onDragUpdate: onDragUpdate,
       onDoubleTapDown: onDoubleTapDown,
+      // andssh P6: when suppressed, skip registering the long-press
+      // and pan recognizers entirely so they don't win the gesture
+      // arena from a wrapping [SelectableRegion].
+      suppressLongPressAndPan: widget.suppressInternalSelectionGestures,
     );
   }
 
@@ -101,19 +124,16 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
     TerminalMouseButton button, {
     bool forceCallback = false,
   }) {
-    // Check if the terminal should and can handle the tap down event.
-    var handled = false;
-    if (_shouldSendTapEvent) {
-      handled = renderTerminal.mouseEvent(
-        button,
-        TerminalMouseButtonState.down,
-        details.localPosition,
-      );
-    }
-    // If the event was not handled by the terminal, use the supplied callback.
-    if (!handled || forceCallback) {
-      callback?.call(details);
-    }
+    // andssh P9: don't send mouse-down on tap-down. Sending it here means
+    // tmux/mouse-aware apps receive a button-press every time the user's
+    // finger touches the screen — including at the start of what will
+    // become a long-press. They respond immediately (scrolling, entering
+    // copy mode, repositioning the cursor) and the buffer changes out
+    // from under us before selectWord can run. Instead, we defer the
+    // button-down to tap-up, where we send a paired down+up sequence so
+    // the app sees a complete click. Long-presses now send no mouse
+    // events at all — exactly what we want.
+    callback?.call(details);
   }
 
   void _tapUp(
@@ -123,16 +143,33 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
     bool forceCallback = false,
   }) {
     // Check if the terminal should and can handle the tap up event.
-    var handled = false;
     if (_shouldSendTapEvent) {
-      handled = renderTerminal.mouseEvent(
-        button,
-        TerminalMouseButtonState.up,
-        details.localPosition,
-      );
+      if (widget.terminalController.suppressNextTapMouseEvent) {
+        // andssh P10: this tap's only job was to dismiss our frozen
+        // selection overlay. Don't poke the remote with a click that
+        // would put it in a stale state for the next gesture.
+        widget.terminalController.suppressNextTapMouseEvent = false;
+      } else {
+        // andssh P9: paired down+up so the app sees a complete click
+        // (since we skipped the down in _tapDown).
+        renderTerminal.mouseEvent(
+          button,
+          TerminalMouseButtonState.down,
+          details.localPosition,
+        );
+        renderTerminal.mouseEvent(
+          button,
+          TerminalMouseButtonState.up,
+          details.localPosition,
+        );
+      }
     }
-    // If the event was not handled by the terminal, use the supplied callback.
-    if (!handled || forceCallback) {
+    // andssh P10: always call the tap-up callback regardless of whether
+    // the mouse-event path ran. Upstream gated this on `!handled` so the
+    // IME-request logic in _onSingleTapUp never ran when the remote was
+    // in mouse-reporting mode — meaning once the user manually closed
+    // the keyboard in tmux, tapping could never bring it back.
+    if (callback != null || forceCallback) {
       callback?.call(details);
     }
   }
@@ -169,20 +206,28 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
   }
 
   void onDoubleTapDown(TapDownDetails details) {
+    if (widget.suppressInternalSelectionGestures) return;
     renderTerminal.selectWord(details.localPosition);
   }
 
-  // andssh P3: defer selection until we see any drag movement.  A
-  // "bare" long-press (finger held still, then released) fires
-  // [widget.onLongPressTap] instead so the caller can show a Paste
-  // menu. Matches how Android text fields treat long-press-on-blank.
+  // andssh P8: notify caller first so the SSH stream is frozen before
+  // any selectWord is called — guarantees tmux cannot redraw and detach
+  // CellAnchors between freeze and selection.
+  // andssh P3 (revised): now that the buffer is frozen, immediately
+  // select the word at the long-press position so the user sees instant
+  // feedback without needing to drag. Drag still extends the selection.
   void onLongPressStart(LongPressStartDetails details) {
+    widget.onLongPressStart?.call(details); // P8: freeze first
     _lastLongPressStartDetails = details;
     _longPressMoved = false;
+    if (!widget.suppressInternalSelectionGestures) {
+      renderTerminal.selectWord(details.localPosition);
+    }
   }
 
   void onLongPressMoveUpdate(LongPressMoveUpdateDetails details) {
     _longPressMoved = true;
+    if (widget.suppressInternalSelectionGestures) return;
     renderTerminal.selectWord(
       _lastLongPressStartDetails!.localPosition,
       details.localPosition,
@@ -198,13 +243,14 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
 
   void onDragStart(DragStartDetails details) {
     _lastDragStartDetails = details;
-
+    if (widget.suppressInternalSelectionGestures) return;
     details.kind == PointerDeviceKind.mouse
         ? renderTerminal.selectCharacters(details.localPosition)
         : renderTerminal.selectWord(details.localPosition);
   }
 
   void onDragUpdate(DragUpdateDetails details) {
+    if (widget.suppressInternalSelectionGestures) return;
     renderTerminal.selectCharacters(
       _lastDragStartDetails!.localPosition,
       details.localPosition,

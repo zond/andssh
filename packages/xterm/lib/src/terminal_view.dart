@@ -38,6 +38,7 @@ class TerminalView extends StatefulWidget {
     this.onTapUp,
     this.onSecondaryTapDown,
     this.onSecondaryTapUp,
+    this.onLongPressStart,
     this.onLongPressTap,
     this.mouseCursor = SystemMouseCursors.text,
     this.keyboardType = TextInputType.emailAddress,
@@ -51,6 +52,7 @@ class TerminalView extends StatefulWidget {
     this.hardwareKeyboardOnly = false,
     this.simulateScroll = true,
     this.handleAltBufferTouchScroll = true,
+    this.suppressInternalSelectionGestures = false,
   });
 
   /// The underlying terminal that this widget renders.
@@ -89,6 +91,11 @@ class TerminalView extends StatefulWidget {
 
   /// Callback for when the user taps on the terminal.
   final void Function(TapUpDetails, CellOffset)? onTapUp;
+
+  /// andssh P8: called at the moment a long-press is recognised, before
+  /// any selection is attempted. Use to freeze SSH data writes so the
+  /// buffer is stable while xterm builds CellAnchors.
+  final void Function(LongPressStartDetails, CellOffset)? onLongPressStart;
 
   /// Function called when the user taps on the terminal with a secondary
   /// button.
@@ -156,6 +163,15 @@ class TerminalView extends StatefulWidget {
   /// wins touch drag from long-press and text selection breaks inside
   /// tmux / vim / less.
   final bool handleAltBufferTouchScroll;
+
+  /// andssh P6: if true, xterm's built-in long-press / drag / double-
+  /// tap selection handlers are no-ops. Use when the terminal is
+  /// wrapped in Flutter's [SelectionArea] so the framework owns
+  /// selection gestures and can drive them through
+  /// `SelectionContainerDelegate.dispatchSelectionEvent`. Without this,
+  /// xterm wins the gesture arena and the framework never hears about
+  /// the selection — so no teardrop handles and no adaptive toolbar.
+  final bool suppressInternalSelectionGestures;
 
   @override
   State<TerminalView> createState() => TerminalViewState();
@@ -315,12 +331,17 @@ class TerminalViewState extends State<TerminalView> {
     child = TerminalGestureHandler(
       terminalView: this,
       terminalController: _controller,
+      suppressInternalSelectionGestures:
+          widget.suppressInternalSelectionGestures,
       onTapUp: _onTapUp,
+      onSingleTapUp: _onSingleTapUp,
       onTapDown: _onTapDown,
       onSecondaryTapDown:
           widget.onSecondaryTapDown != null ? _onSecondaryTapDown : null,
       onSecondaryTapUp:
           widget.onSecondaryTapUp != null ? _onSecondaryTapUp : null,
+      onLongPressStart:
+          widget.onLongPressStart != null ? _onLongPressStart : null,
       onLongPressTap:
           widget.onLongPressTap != null ? _onLongPressTap : null,
       readOnly: widget.readOnly,
@@ -363,15 +384,22 @@ class TerminalViewState extends State<TerminalView> {
     widget.onTapUp?.call(details, offset);
   }
 
-  void _onTapDown(_) {
+  // andssh P7: tap-down used to request the IME immediately on every
+  // pointer-down. That made the soft keyboard flicker into view at the
+  // start of every long-press (before the long-press recognizer
+  // resolved and the tap lost the arena). Keyboard open is now deferred
+  // to [_onSingleTapUp], i.e. only real tap gestures bring up the IME.
+  void _onTapDown(_) {}
+
+  void _onSingleTapUp(TapUpDetails details) {
     if (_controller.selection != null) {
       _controller.clearSelection();
+      return;
+    }
+    if (!widget.hardwareKeyboardOnly) {
+      _customTextEditKey.currentState?.requestKeyboard();
     } else {
-      if (!widget.hardwareKeyboardOnly) {
-        _customTextEditKey.currentState?.requestKeyboard();
-      } else {
-        _focusNode.requestFocus();
-      }
+      _focusNode.requestFocus();
     }
   }
 
@@ -383,6 +411,11 @@ class TerminalViewState extends State<TerminalView> {
   void _onSecondaryTapUp(TapUpDetails details) {
     final offset = renderTerminal.getCellOffset(details.localPosition);
     widget.onSecondaryTapUp?.call(details, offset);
+  }
+
+  void _onLongPressStart(LongPressStartDetails details) {
+    final offset = renderTerminal.getCellOffset(details.localPosition);
+    widget.onLongPressStart?.call(details, offset);
   }
 
   void _onLongPressTap(LongPressStartDetails details) {

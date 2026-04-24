@@ -16,6 +16,74 @@ When rebasing onto a newer upstream release:
 
 ## Patches
 
+### P11 — Fix aliasing bug in `IndexAwareCircularBuffer._adoptChild` (`lib/src/utils/circular_buffer.dart`)
+
+`Buffer.scrollDown` and `scrollUp` move lines within the buffer by assigning `this.lines[i] = this.lines[i - n]`. That reassignment goes through `_adoptChild`, which detaches whatever was at `[i]` and stores the source line there — but it *doesn't* clear the source slot `[i - n]`. The same `BufferLine` instance is now referenced from two array positions. A later iteration of the caller's loop then assigns something new to `[i - n]`, and `_adoptChild` there calls `_detach()` on the shared line — which nulls its `_owner` while it is still referenced at `[i]`.
+
+From then on, `lines[i]` returns a line object whose `attached` getter is `false`. Any anchor created with `lines[i].createAnchor(x)` is born detached, and `TerminalController.selection` returns `null` because its getter requires `base.attached && extent.attached`. Visible symptom in andssh: long-press in tmux (alt-buffer) after the keyboard has been toggled silently fails to produce a selection, because tmux's `SIGWINCH`-triggered redraw after the resize runs scroll operations that leave the buffer full of zombie lines.
+
+Fixed `_adoptChild` to detect when the incoming `child` is already attached to this same buffer at a different index, and null out that stale slot before attaching the child at the destination — preventing the double-reference that the later `_detach` relies on.
+
+### P10 — `suppressNextTapMouseEvent` + always fire tap-up callback (`lib/src/ui/controller.dart`, `lib/src/ui/gesture/gesture_handler.dart`)
+
+Two small changes to fix two tmux-specific bugs that surfaced after P9:
+
+1. **Dismiss-tap poked tmux with a click.** When the user taps to dismiss our frozen selection overlay, the same tap-up still ran `_tapUp`'s paired mouse-down+up — which in mouse-reporting mode reaches tmux as a real click, often moving the cursor or entering tmux's own copy mode and leaving the next long-press operating against stale state. Added a one-shot `TerminalController.suppressNextTapMouseEvent` flag that `_tapUp` consumes before emitting the mouse event. andssh sets it in `_dismissSelection`.
+
+2. **Tap could not reopen the soft keyboard in mouse-reporting mode.** Upstream's `_tapUp` gated the callback on `!handled`, and `handled=true` whenever mouse-reporting consumed the click — so `_onSingleTapUp`'s `requestKeyboard()` never ran in tmux. Once the user closed the keyboard it couldn't be reopened by tapping the terminal. `_tapUp` now always invokes the callback; `requestKeyboard()` is idempotent, so taps that simply maintain focus are harmless.
+
+### P9 — Defer mouse-button-down to tap-up (`lib/src/ui/gesture/gesture_handler.dart`)
+
+Upstream's `_tapDown` sent an SGR mouse button-press to the remote program immediately on every pointer-down — including at the start of a gesture that would become a long-press. In mouse-aware apps (tmux with mouse mode, less, vim) that's a real click: they start scrolling, entering copy mode, or repositioning the cursor. By the time the long-press fires and `selectWord` runs, the buffer has already been modified, so the word the user targeted is gone (or has moved rows).
+
+Moved the mouse-button event emission to `_tapUp`, where we now send a paired down+up sequence so the remote still sees a complete click on a real tap. Long-presses send no mouse events at all — tmux's buffer stays static until P8's `session.freeze()` takes over.
+
+### P8 — `onLongPressStart` callback for freeze-before-select (`lib/src/ui/gesture/gesture_handler.dart`, `lib/src/terminal_view.dart`)
+
+Added `onLongPressStart` callback (with `CellOffset`) to `TerminalGestureHandler` and `TerminalView`. It fires at the moment a long-press is recognised, before P3's `onLongPressMoveUpdate` calls `selectWord`. andssh calls `session.freeze()` here to pause SSH stdout/stderr; the terminal buffer is therefore static when xterm builds its `CellAnchor` selection objects, preventing tmux redraws from detaching them mid-gesture.
+
+### P7 — Open the IME on tap-up, not tap-down (`lib/src/terminal_view.dart`)
+
+Upstream's `_onTapDown` called `CustomTextEdit.requestKeyboard()`
+immediately on every pointer-down. That made the soft keyboard flash
+into view at the start of every long-press gesture (it opens, then the
+long-press wins the arena and the consumer tears the view down →
+keyboard closes again — visible flicker to the user).
+
+Moved the keyboard-request logic to a new `_onSingleTapUp` method and
+wired it through `TerminalGestureHandler.onSingleTapUp`. Only real tap
+gestures now open the IME; long-press and drag leave it alone.
+
+### P6 — `suppressInternalSelectionGestures` flag (`lib/src/ui/gesture/gesture_handler.dart`, `lib/src/terminal_view.dart`)
+
+When `TerminalView` is wrapped in Flutter's `SelectionArea`, both
+xterm's own `TerminalGestureDetector` and the framework's
+`SelectableRegion` register competing long-press / drag / double-tap
+recognizers. xterm's win the arena, call `renderTerminal.selectWord`
+directly, and the framework never sees the event — so its draggable
+handles and adaptive toolbar never appear.
+
+Added `suppressInternalSelectionGestures` (default false) to
+`TerminalView` and `TerminalGestureHandler`. When true, xterm's
+long-press / drag / double-tap paths no longer call selectWord /
+selectCharacters, freeing the framework to drive selection via
+`SelectionContainerDelegate.dispatchSelectionEvent`. Other terminal
+gestures (tap to focus, mouse reporting) still work.
+
+### P5 — Push selection-handle `LeaderLayer`s (`lib/src/ui/render.dart`)
+
+`SelectionContainerDelegate.pushHandleLayers` hands two `LayerLink`s,
+one per teardrop handle. The framework's handle widgets use
+`CompositedTransformFollower` to follow those links — they only render
+if somebody has actually installed a `LeaderLayer` with the same link
+during paint.
+
+Added `startHandleLayerLink` and `endHandleLayerLink` setters on
+`RenderTerminal`. Paint now pushes a zero-size `LeaderLayer` at each
+selection endpoint (bottom of the cell, so the teardrop points up into
+the selection), letting Flutter's adaptive handles track the terminal's
+own selection state.
+
 ### P4 — Opt-out of alt-buffer `InfiniteScrollView` (`lib/src/ui/scroll_handler.dart`, `lib/src/terminal_view.dart`)
 
 Upstream unconditionally wraps the terminal in an `InfiniteScrollView`

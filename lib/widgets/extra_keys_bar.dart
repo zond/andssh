@@ -1,10 +1,16 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:xterm/xterm.dart';
 
-/// A virtual-keyboard row for keys that Android's soft keyboard doesn't
-/// expose (arrows, Home/End, PgUp/PgDn, F-keys, Tab, Esc) plus sticky
+/// A virtual-keyboard strip (two rows) for keys that Android's soft keyboard
+/// doesn't expose (arrows, Home/End, PgUp/PgDn, F-keys, Tab, Esc) plus sticky
 /// modifier toggles for Ctrl/Alt/Shift so combos like Ctrl+A (the default
 /// tmux prefix) work with single-character keys from the soft keyboard.
+///
+/// Non-modifier keys auto-repeat when held, matching a hardware keyboard:
+/// the action fires once immediately, then again after a 400 ms delay, then
+/// every 50 ms while the finger is held down.
 class ExtraKeysBar extends StatelessWidget {
   const ExtraKeysBar({
     super.key,
@@ -24,53 +30,65 @@ class ExtraKeysBar extends StatelessWidget {
           elevation: 2,
           child: SafeArea(
             top: false,
-            child: SizedBox(
-              height: 44,
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 2),
-                children: [
-                  _arrow('↑', () => controller.sendKey(TerminalKey.arrowUp)),
-                  _arrow(
-                      '↓', () => controller.sendKey(TerminalKey.arrowDown)),
-                  _arrow(
-                      '←', () => controller.sendKey(TerminalKey.arrowLeft)),
-                  _arrow(
-                      '→', () => controller.sendKey(TerminalKey.arrowRight)),
-                  const SizedBox(width: 4),
-                  _toggle('Ctrl', controller.ctrl,
-                      () => controller.toggleCtrl()),
-                  _toggle(
-                      'Alt', controller.alt, () => controller.toggleAlt()),
-                  _toggle('Shift', controller.shift,
-                      () => controller.toggleShift()),
-                  const SizedBox(width: 4),
-                  _key('Esc', () => controller.sendKey(TerminalKey.escape)),
-                  _key('Tab', () => controller.sendKey(TerminalKey.tab)),
-                  _key('|', () => controller.sendText('|')),
-                  _key('/', () => controller.sendText('/')),
-                  _key('\\', () => controller.sendText('\\')),
-                  _key('~', () => controller.sendText('~')),
-                  _key('-', () => controller.sendText('-')),
-                  _key('_', () => controller.sendText('_')),
-                  const SizedBox(width: 4),
-                  _key('Home', () => controller.sendKey(TerminalKey.home)),
-                  _key('End', () => controller.sendKey(TerminalKey.end)),
-                  _key('PgUp', () => controller.sendKey(TerminalKey.pageUp)),
-                  _key('PgDn',
-                      () => controller.sendKey(TerminalKey.pageDown)),
-                  _key('Ins', () => controller.sendKey(TerminalKey.insert)),
-                  _key('Del', () => controller.sendKey(TerminalKey.delete)),
-                  const SizedBox(width: 4),
-                  for (int i = 1; i <= 12; i++)
-                    _key('F$i', () => controller.sendFKey(i)),
-                ],
-              ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _buildRow(_row1Children()),
+                _buildRow(_row2Children()),
+              ],
             ),
           ),
         );
       },
     );
+  }
+
+  Widget _buildRow(List<Widget> children) {
+    return SizedBox(
+      height: 44,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 2),
+        children: children,
+      ),
+    );
+  }
+
+  List<Widget> _row1Children() {
+    return [
+      _arrow('↑', () => controller.sendKey(TerminalKey.arrowUp)),
+      _arrow('↓', () => controller.sendKey(TerminalKey.arrowDown)),
+      _arrow('←', () => controller.sendKey(TerminalKey.arrowLeft)),
+      _arrow('→', () => controller.sendKey(TerminalKey.arrowRight)),
+      const SizedBox(width: 4),
+      _toggle('Ctrl', controller.ctrl, controller.toggleCtrl),
+      _toggle('Alt', controller.alt, controller.toggleAlt),
+      _toggle('Shift', controller.shift, controller.toggleShift),
+      const SizedBox(width: 4),
+      _key('Esc', () => controller.sendKey(TerminalKey.escape)),
+      _key('Tab', () => controller.sendKey(TerminalKey.tab)),
+      _key('|', () => controller.sendText('|')),
+      _key('/', () => controller.sendText('/')),
+      _key('\\', () => controller.sendText('\\')),
+      _key('~', () => controller.sendText('~')),
+      _key('-', () => controller.sendText('-')),
+      _key('_', () => controller.sendText('_')),
+    ];
+  }
+
+  List<Widget> _row2Children() {
+    return [
+      _key('Home', () => controller.sendKey(TerminalKey.home)),
+      _key('End', () => controller.sendKey(TerminalKey.end)),
+      _key('PgUp', () => controller.sendKey(TerminalKey.pageUp)),
+      _key('PgDn', () => controller.sendKey(TerminalKey.pageDown)),
+      const SizedBox(width: 4),
+      _key('Ins', () => controller.sendKey(TerminalKey.insert)),
+      _key('Del', () => controller.sendKey(TerminalKey.delete)),
+      const SizedBox(width: 4),
+      for (int i = 1; i <= 12; i++)
+        _key('F$i', () => controller.sendFKey(i)),
+    ];
   }
 
   Widget _toggle(String label, bool active, VoidCallback onTap) {
@@ -87,38 +105,91 @@ class ExtraKeysBar extends StatelessWidget {
   }
 
   Widget _key(String label, VoidCallback onTap) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 1, vertical: 4),
-      child: OutlinedButton(
-        style: OutlinedButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 6),
-          // Square-minimum so single-character buttons like "|" or "/"
-          // get a finger-friendly hit area, while longer labels expand
-          // horizontally as needed.
-          minimumSize: const Size(36, 36),
-          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          visualDensity: VisualDensity.compact,
-        ),
-        onPressed: onTap,
-        child: Text(label),
-      ),
-    );
+    return _RepeatKey(label: label, onPress: onTap);
   }
 
   Widget _arrow(String label, VoidCallback onTap) {
+    return _RepeatKey(label: label, onPress: onTap, circle: true);
+  }
+}
+
+/// Button that fires [onPress] once on touch-down and then again on a timer
+/// while the pointer stays down — like a hardware key's auto-repeat. Cancels
+/// the timer on pointer-up or pointer-cancel.
+class _RepeatKey extends StatefulWidget {
+  const _RepeatKey({
+    required this.label,
+    required this.onPress,
+    this.circle = false,
+  });
+
+  final String label;
+  final VoidCallback onPress;
+  final bool circle;
+
+  @override
+  State<_RepeatKey> createState() => _RepeatKeyState();
+}
+
+class _RepeatKeyState extends State<_RepeatKey> {
+  // Android's default key-repeat timings: ~400 ms until the first repeat,
+  // ~50 ms between subsequent repeats.
+  static const _initialDelay = Duration(milliseconds: 400);
+  static const _repeatInterval = Duration(milliseconds: 50);
+
+  Timer? _delayTimer;
+  Timer? _repeatTimer;
+
+  @override
+  void dispose() {
+    _stop();
+    super.dispose();
+  }
+
+  void _start() {
+    widget.onPress();
+    _delayTimer = Timer(_initialDelay, () {
+      _repeatTimer =
+          Timer.periodic(_repeatInterval, (_) => widget.onPress());
+    });
+  }
+
+  void _stop() {
+    _delayTimer?.cancel();
+    _delayTimer = null;
+    _repeatTimer?.cancel();
+    _repeatTimer = null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final style = OutlinedButton.styleFrom(
+      shape: widget.circle ? const CircleBorder() : null,
+      padding: widget.circle
+          ? EdgeInsets.zero
+          : const EdgeInsets.symmetric(horizontal: 6),
+      fixedSize: widget.circle ? const Size(36, 36) : null,
+      // Square-minimum so single-character buttons like "|" or "/" get a
+      // finger-friendly hit area, while longer labels expand as needed.
+      minimumSize: const Size(36, 36),
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      visualDensity: VisualDensity.compact,
+    );
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 1, vertical: 4),
-      child: OutlinedButton(
-        style: OutlinedButton.styleFrom(
-          shape: const CircleBorder(),
-          padding: EdgeInsets.zero,
-          fixedSize: const Size(36, 36),
-          minimumSize: const Size(36, 36),
-          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          visualDensity: VisualDensity.compact,
+      // Listener observes raw pointer events without entering the gesture
+      // arena, so the OutlinedButton's own tap recognizer still runs (giving
+      // us the Material ripple) without double-firing the action — we only
+      // supply a no-op onPressed so the button stays visually enabled.
+      child: Listener(
+        onPointerDown: (_) => _start(),
+        onPointerUp: (_) => _stop(),
+        onPointerCancel: (_) => _stop(),
+        child: OutlinedButton(
+          style: style,
+          onPressed: () {},
+          child: Text(widget.label),
         ),
-        onPressed: onTap,
-        child: Text(label),
       ),
     );
   }

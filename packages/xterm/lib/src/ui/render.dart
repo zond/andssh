@@ -452,6 +452,54 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
         effectLastLine,
       );
     }
+
+    _paintSelectionHandleLeaders(context, offset);
+  }
+
+  // andssh P5: push LeaderLayers at the selection endpoints so Flutter's
+  // SelectionContainer can draw its teardrop handles (which use
+  // CompositedTransformFollower tracking those leaders).
+  LayerLink? _startHandleLink;
+  LayerLink? _endHandleLink;
+  set startHandleLayerLink(LayerLink? link) {
+    if (_startHandleLink == link) return;
+    _startHandleLink = link;
+    markNeedsPaint();
+  }
+
+  set endHandleLayerLink(LayerLink? link) {
+    if (_endHandleLink == link) return;
+    _endHandleLink = link;
+    markNeedsPaint();
+  }
+
+  void _paintSelectionHandleLeaders(PaintingContext context, Offset offset) {
+    final sel = _controller.selection;
+    if (sel == null) return;
+    final lineHeight = _painter.cellSize.height;
+
+    final startLink = _startHandleLink;
+    if (startLink != null) {
+      context.pushLayer(
+        LeaderLayer(
+          link: startLink,
+          offset: offset + getOffset(sel.begin) + Offset(0, lineHeight),
+        ),
+        (_, __) {},
+        Offset.zero,
+      );
+    }
+    final endLink = _endHandleLink;
+    if (endLink != null) {
+      context.pushLayer(
+        LeaderLayer(
+          link: endLink,
+          offset: offset + getOffset(sel.end) + Offset(0, lineHeight),
+        ),
+        (_, __) {},
+        Offset.zero,
+      );
+    }
   }
 
   /// Paints the text that is currently being composed in IME to [canvas] at

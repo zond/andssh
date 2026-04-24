@@ -111,6 +111,13 @@ class TerminalController with ChangeNotifier {
     notifyListeners();
   }
 
+  /// andssh P10: one-shot flag telling the gesture handler to drop the
+  /// paired mouse-down+up it would otherwise send on the next tap. Used
+  /// when the tap's only purpose is to dismiss our frozen selection
+  /// overlay — sending a click to a mouse-aware remote (tmux, vim…) for
+  /// that tap puts the remote in an unwanted state for the next gesture.
+  bool suppressNextTapMouseEvent = false;
+
   // Returns true if this type of PointerInput should be send to the Terminal.
   @internal
   bool shouldSendPointerInput(PointerInput pointerInput) {

@@ -17,6 +17,10 @@ fallback) every time a connection is opened.
 - **Jump host chaining** (SSH `ProxyJump`). Any saved connection can reference
   another as its jump host, and chains are followed recursively through
   `SSHClient.forwardLocal` channels.
+- **SFTP file transfer** from the terminal's menu. Send a local file to a
+  remote directory or fetch a remote file to the device, over the same
+  authenticated SSH session (no second login). Streaming, with progress and
+  cancel; remembers the last local and remote directory per host.
 - **Extra-keys bar** above the soft keyboard for keys Android's IME doesn't
   expose: Esc, Tab, arrows, Home/End, PgUp/PgDn, Ins, Del, F1–F12, and
   punctuation (`| / \ ~ - _`). Sticky Ctrl/Alt/Shift toggles apply to the next
@@ -30,12 +34,13 @@ Grab the latest APK from the
 side-load it on your Android device. You may need to enable "Install unknown
 apps" for your file manager or browser.
 
-APKs are built by the `.github/workflows/release.yml` GitHub Action on every
-`v*` tag push.
+Released APKs are built and signed by the `.github/workflows/release.yml`
+GitHub Action on every `v*` tag push, using an upload keystore stored as
+repository secrets.
 
 ## Build from source
 
-Requirements: Flutter stable (≥ 3.41), JDK 17+, Android SDK with platform 36
+Requirements: Flutter stable (≥ 3.11), JDK 17+, Android SDK with platform 36
 and build-tools 36.
 
 ```bash
@@ -47,31 +52,28 @@ flutter build apk --release
 
 The output lands in `build/app/outputs/flutter-apk/app-release.apk`.
 
+Without signing material, builds fall back to the Flutter debug keystore —
+fine for running on your own device, but the APK isn't distributable and
+doesn't share identity with the published release. To sign with your own
+stable upload key (so debug and release builds replace each other in-place
+and share data) copy `android/key.properties.example` to `android/key.properties`
+and drop your keystore at `android/app/upload-keystore.jks`. Both paths are
+`.gitignore`d.
+
 To cut a release:
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.X.Y
+git push origin v0.X.Y
 ```
 
-The workflow will build the APK and attach it to a new GitHub Release.
+The workflow builds the APK and attaches it to a new GitHub Release.
 
-## Project layout
+## Notes
 
-```
-lib/
-  main.dart                       -- provider setup, app entry point
-  models/ssh_connection.dart      -- connection + credential data classes
-  services/
-    secret_store.dart             -- biometric-gated secure storage
-    connection_store.dart         -- JSON-file metadata store
-    ssh_connector.dart            -- jump host chain resolution (ProxyJump)
-  screens/
-    connections_page.dart         -- saved connection list
-    connection_form_page.dart     -- add/edit a connection
-    terminal_page.dart            -- xterm TerminalView + SSH session
-  widgets/extra_keys_bar.dart     -- sticky-modifier extra-keys row
-```
+`xterm.dart` is vendored under `packages/xterm/` so we can patch bugs and
+extend behaviour we hit in andssh. Every local change is recorded in
+`packages/xterm/PATCHES.md`.
 
 The Android `MainActivity` extends `FlutterFragmentActivity` (required by
 `local_auth` for the biometric prompt). `minSdk` is 24 because

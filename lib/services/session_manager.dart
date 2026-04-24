@@ -39,6 +39,35 @@ class ActiveSession {
 
   bool _frozen = false;
 
+  Future<SftpClient>? _sftpFuture;
+
+  Timer? _resizeDebounce;
+
+  /// Coalesces rapid terminal resize events (e.g. during the Android
+  /// soft-keyboard slide animation) into a single SSH window-change
+  /// notification. Without this, each cell-boundary crossing during the
+  /// animation would fire its own SIGWINCH at tmux, and tmux's responding
+  /// full-screen redraws flood the connection — sometimes to the point
+  /// where the display stays stale for several seconds or never recovers
+  /// without reconnect.
+  ///
+  /// Called from `terminal.onResize` after this session exists.
+  void scheduleResize(int w, int h, int pw, int ph) {
+    _resizeDebounce?.cancel();
+    _resizeDebounce = Timer(const Duration(milliseconds: 150), () {
+      try {
+        sshSession.resizeTerminal(w, h, pw, ph);
+      } catch (e) {
+        _log('resize after session close: $e');
+      }
+    });
+  }
+
+  /// Lazily opens the SFTP subsystem on the same authenticated SSH session
+  /// the terminal is using, and caches it. Callers share one [SftpClient]
+  /// for the lifetime of the session; it's closed in [close].
+  Future<SftpClient> sftp() => _sftpFuture ??= bundle.target.sftp();
+
   /// Pause SSH stdout/stderr delivery to the terminal. Idempotent — calling
   /// it multiple times has the same effect as calling it once, so a second
   /// long-press before the first was dismissed cannot accumulate extra pause
@@ -59,9 +88,19 @@ class ActiveSession {
   }
 
   Future<void> close() async {
+    _resizeDebounce?.cancel();
+    _resizeDebounce = null;
     await stdoutSub.cancel();
     await stderrSub.cancel();
     await doneSub.cancel();
+    final sftpFuture = _sftpFuture;
+    if (sftpFuture != null) {
+      try {
+        (await sftpFuture).close();
+      } catch (_) {
+        // Ignore — the SSH session tear-down below will sweep it up anyway.
+      }
+    }
     sshSession.close();
     await bundle.close();
   }
@@ -121,8 +160,6 @@ class SessionManager extends ChangeNotifier {
 
     terminal.buffer.clear();
     terminal.buffer.setCursor(0, 0);
-    terminal.onResize =
-        (w, h, pw, ph) => sshSession.resizeTerminal(w, h, pw, ph);
     terminal.onOutput = (data) {
       // Log escape-sequence traffic so mouse / cursor-key / function-key
       // mishaps are visible in `adb logcat`. Plain typed bytes are
@@ -161,6 +198,9 @@ class SessionManager extends ChangeNotifier {
       stderrSub: stderrSub,
       doneSub: doneSub,
     );
+    // Route resize events through the session's debouncer so rapid
+    // resizes (keyboard slide, rotation) only emit one SIGWINCH.
+    terminal.onResize = session.scheduleResize;
     _sessions[connection.id] = session;
     notifyListeners();
     return session;

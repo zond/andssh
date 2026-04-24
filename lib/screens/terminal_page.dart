@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:developer' as developer;
+import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -9,10 +11,13 @@ import 'package:xterm/xterm.dart';
 
 import '../models/host_preferences.dart';
 import '../models/ssh_connection.dart';
+import '../services/file_transfer.dart';
 import '../services/host_settings_store.dart';
 import '../services/session_manager.dart';
 import '../widgets/extra_keys_bar.dart';
+import '../widgets/remote_file_picker.dart';
 import '../widgets/terminal_selection_handles.dart';
+import '../widgets/transfer_progress_dialog.dart';
 import 'terminal_settings_page.dart';
 
 class TerminalPage extends StatefulWidget {
@@ -167,6 +172,154 @@ class _TerminalPageState extends State<TerminalPage> {
   }
 
   Future<void> _copyCaptured() => _copyAndUnfreeze();
+
+  // ── File transfer ─────────────────────────────────────────────────────────
+
+  Future<void> _uploadFlow() async {
+    final session = _session;
+    if (session == null) return;
+    final store = context.read<HostSettingsStore>();
+    final host = widget.connection.host;
+    final prefs = store.get(host);
+
+    final pick = await FilePicker.pickFiles(
+      initialDirectory: prefs.lastLocalDir,
+    );
+    if (pick == null || pick.files.isEmpty) return;
+    final picked = pick.files.first;
+    final localPath = picked.path;
+    if (localPath == null) return;
+    final local = File(localPath);
+    unawaited(store.update(
+      host, store.get(host).copyWith(lastLocalDir: _dirname(localPath))));
+
+    if (!mounted) return;
+    final sftp = await session.sftp();
+    if (!mounted) return;
+
+    final remoteDir = await RemoteFilePicker.show(
+      context,
+      sftp: sftp,
+      mode: RemotePickerMode.directory,
+      initialPath: prefs.lastRemoteDir,
+    );
+    if (remoteDir == null || !mounted) return;
+    unawaited(store.update(
+      host, store.get(host).copyWith(lastRemoteDir: remoteDir)));
+
+    final remotePath = remoteDir.endsWith('/')
+        ? '$remoteDir${picked.name}'
+        : '$remoteDir/${picked.name}';
+
+    await _runTransfer(
+      title: 'Uploading',
+      filename: picked.name,
+      action: (c) => uploadFile(
+        local: local,
+        sftp: sftp,
+        remotePath: remotePath,
+        controller: c,
+      ),
+    );
+  }
+
+  Future<void> _downloadFlow() async {
+    final session = _session;
+    if (session == null) return;
+    final store = context.read<HostSettingsStore>();
+    final host = widget.connection.host;
+    final prefs = store.get(host);
+
+    final sftp = await session.sftp();
+    if (!mounted) return;
+
+    final remotePath = await RemoteFilePicker.show(
+      context,
+      sftp: sftp,
+      mode: RemotePickerMode.file,
+      initialPath: prefs.lastRemoteDir,
+    );
+    if (remotePath == null || !mounted) return;
+    final remoteName = _basename(remotePath);
+    unawaited(store.update(
+      host,
+      store.get(host).copyWith(lastRemoteDir: _dirname(remotePath)),
+    ));
+
+    // file_picker's saveFile() on Android requires the bytes up front — we
+    // can't stream into it — so we pick a directory and append the name
+    // ourselves, symmetric with how we pick the remote upload destination.
+    final localDir = await FilePicker.getDirectoryPath(
+      dialogTitle: 'Save $remoteName into…',
+      initialDirectory: prefs.lastLocalDir,
+    );
+    if (localDir == null || !mounted) return;
+    unawaited(store.update(
+      host, store.get(host).copyWith(lastLocalDir: localDir)));
+
+    final localPath =
+        localDir.endsWith('/') ? '$localDir$remoteName' : '$localDir/$remoteName';
+
+    await _runTransfer(
+      title: 'Downloading',
+      filename: remoteName,
+      action: (c) => downloadFile(
+        sftp: sftp,
+        remotePath: remotePath,
+        local: File(localPath),
+        controller: c,
+      ),
+    );
+  }
+
+  /// Shows a modal [TransferProgressDialog] while [action] runs, and
+  /// surfaces the outcome (done / cancelled / error) via SnackBar. The
+  /// dialog is always popped once [action] resolves, regardless of which
+  /// way it finished.
+  Future<void> _runTransfer({
+    required String title,
+    required String filename,
+    required Future<void> Function(TransferController) action,
+  }) async {
+    final controller = TransferController(filename: filename);
+    final transfer = action(controller);
+
+    // Show the dialog without awaiting it — it stays up until we pop.
+    unawaited(showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => TransferProgressDialog(
+        controller: controller,
+        title: title,
+      ),
+    ));
+
+    String? message;
+    try {
+      await transfer;
+      message = '$title complete';
+    } on TransferCancelled {
+      message = 'Transfer cancelled';
+    } catch (e) {
+      message = 'Transfer failed: $e';
+    }
+
+    if (!mounted) return;
+    // Pop the progress dialog.
+    Navigator.of(context, rootNavigator: true).pop();
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  static String _basename(String path) {
+    final i = path.lastIndexOf('/');
+    return i < 0 ? path : path.substring(i + 1);
+  }
+
+  static String _dirname(String path) {
+    final i = path.lastIndexOf('/');
+    if (i <= 0) return '/';
+    return path.substring(0, i);
+  }
 
   // ── Freeze helpers ────────────────────────────────────────────────────────
 
@@ -506,6 +659,12 @@ class _TerminalPageState extends State<TerminalPage> {
                 case _MenuAction.paste:
                   _paste();
                   break;
+                case _MenuAction.sendFile:
+                  unawaited(_uploadFlow());
+                  break;
+                case _MenuAction.fetchFile:
+                  unawaited(_downloadFlow());
+                  break;
                 case _MenuAction.settings:
                   _openSettings();
                   break;
@@ -521,6 +680,22 @@ class _TerminalPageState extends State<TerminalPage> {
                   child: ListTile(
                     leading: Icon(Icons.content_paste),
                     title: Text('Paste'),
+                  ),
+                ),
+              if (session != null)
+                const PopupMenuItem(
+                  value: _MenuAction.sendFile,
+                  child: ListTile(
+                    leading: Icon(Icons.upload_file),
+                    title: Text('Send file…'),
+                  ),
+                ),
+              if (session != null)
+                const PopupMenuItem(
+                  value: _MenuAction.fetchFile,
+                  child: ListTile(
+                    leading: Icon(Icons.download),
+                    title: Text('Fetch file…'),
                   ),
                 ),
               const PopupMenuItem(
@@ -608,4 +783,4 @@ class _TerminalPageState extends State<TerminalPage> {
   }
 }
 
-enum _MenuAction { paste, settings, disconnect }
+enum _MenuAction { paste, sendFile, fetchFile, settings, disconnect }

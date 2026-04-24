@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -61,8 +63,11 @@ class _AndsshAppState extends State<AndsshApp> {
 
   @override
   void dispose() {
-    _notifications.dispose();
-    _sessions.disconnectAll();
+    // Both return futures; State.dispose can't await. Mark the intent
+    // explicitly so the analyzer doesn't flag it and future readers
+    // see that we're fire-and-forgetting the SSH tear-down on purpose.
+    unawaited(_notifications.dispose());
+    unawaited(_sessions.disconnectAll());
     super.dispose();
   }
 

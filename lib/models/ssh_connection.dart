@@ -13,6 +13,17 @@ class SshConnection {
   /// so arbitrarily long chains are supported.
   final String? jumpHostId;
 
+  /// SSH host-key type (e.g. `ssh-rsa`, `ssh-ed25519`) pinned after the
+  /// first successful connection. `null` means "not yet pinned" — the
+  /// next connect trusts-on-first-use, captures the fingerprint, and
+  /// stores it via [copyWith].
+  final String? hostKeyType;
+
+  /// MD5 fingerprint of the pinned host key as a lowercase hex string
+  /// (no separators). Compared byte-for-byte against the fingerprint
+  /// dartssh2 reports on each connect; a mismatch is flagged to the UI.
+  final String? hostKeyFingerprint;
+
   const SshConnection({
     required this.id,
     required this.name,
@@ -21,6 +32,8 @@ class SshConnection {
     required this.username,
     required this.authMethod,
     this.jumpHostId,
+    this.hostKeyType,
+    this.hostKeyFingerprint,
   });
 
   SshConnection copyWith({
@@ -31,6 +44,9 @@ class SshConnection {
     SshAuthMethod? authMethod,
     String? jumpHostId,
     bool clearJumpHost = false,
+    String? hostKeyType,
+    String? hostKeyFingerprint,
+    bool clearHostKey = false,
   }) {
     return SshConnection(
       id: id,
@@ -40,6 +56,10 @@ class SshConnection {
       username: username ?? this.username,
       authMethod: authMethod ?? this.authMethod,
       jumpHostId: clearJumpHost ? null : (jumpHostId ?? this.jumpHostId),
+      hostKeyType: clearHostKey ? null : (hostKeyType ?? this.hostKeyType),
+      hostKeyFingerprint: clearHostKey
+          ? null
+          : (hostKeyFingerprint ?? this.hostKeyFingerprint),
     );
   }
 
@@ -51,6 +71,8 @@ class SshConnection {
         'username': username,
         'authMethod': authMethod.name,
         if (jumpHostId != null) 'jumpHostId': jumpHostId,
+        if (hostKeyType != null) 'hostKeyType': hostKeyType,
+        if (hostKeyFingerprint != null) 'hostKeyFingerprint': hostKeyFingerprint,
       };
 
   factory SshConnection.fromJson(Map<String, dynamic> json) => SshConnection(
@@ -64,6 +86,8 @@ class SshConnection {
           orElse: () => SshAuthMethod.password,
         ),
         jumpHostId: json['jumpHostId'] as String?,
+        hostKeyType: json['hostKeyType'] as String?,
+        hostKeyFingerprint: json['hostKeyFingerprint'] as String?,
       );
 }
 
@@ -90,4 +114,13 @@ class SshCredentials {
         privateKey: json['privateKey'] as String?,
         privateKeyPassphrase: json['privateKeyPassphrase'] as String?,
       );
+
+  // Defensive: stringifying these accidentally (crash report, assertion
+  // message, dev-tools state inspector) must never leak the credential.
+  @override
+  String toString() => 'SshCredentials('
+      '${password != null ? "password=<redacted> " : ""}'
+      '${privateKey != null ? "privateKey=<redacted> " : ""}'
+      '${privateKeyPassphrase != null ? "privateKeyPassphrase=<redacted>" : ""}'
+      ')';
 }

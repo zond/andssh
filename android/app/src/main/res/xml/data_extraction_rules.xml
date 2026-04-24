@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ backup exclusion rules. We exclude the app from both
+  cloud backup and device-to-device transfer because our data includes
+  the flutter_secure_storage blob (encrypted SSH credentials) and the
+  Keystore-wrapped keys that can unlock it. Allowing those to travel
+  off-device would undermine the "credentials are device-bound" story.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+    </device-transfer>
+</data-extraction-rules>

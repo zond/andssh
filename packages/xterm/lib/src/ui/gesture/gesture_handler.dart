@@ -124,15 +124,32 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
     TerminalMouseButton button, {
     bool forceCallback = false,
   }) {
-    // andssh P9: don't send mouse-down on tap-down. Sending it here means
-    // tmux/mouse-aware apps receive a button-press every time the user's
-    // finger touches the screen — including at the start of what will
-    // become a long-press. They respond immediately (scrolling, entering
-    // copy mode, repositioning the cursor) and the buffer changes out
-    // from under us before selectWord can run. Instead, we defer the
-    // button-down to tap-up, where we send a paired down+up sequence so
-    // the app sees a complete click. Long-presses now send no mouse
-    // events at all — exactly what we want.
+    // andssh P9: for *touch*, don't send mouse-down on tap-down.
+    // Touch can escalate into a long-press, and sending button-down
+    // eagerly makes tmux/mouse-aware apps respond to what's actually
+    // the start of a selection gesture. We send the paired down+up
+    // from _tapUp instead; long-presses then generate no mouse events.
+    //
+    // For a real mouse pointer this isn't a concern — our
+    // LongPressGestureRecognizer is registered touch-only
+    // (gesture_detector.dart supportedDevices) — and deferring on mouse
+    // breaks drag-select / vim-visual-block / scroll-click in mouse-aware
+    // apps, which rely on seeing a button-down at press and motion
+    // events while held. Preserve upstream semantics for mouse.
+    if (details.kind == PointerDeviceKind.mouse) {
+      var handled = false;
+      if (_shouldSendTapEvent) {
+        handled = renderTerminal.mouseEvent(
+          button,
+          TerminalMouseButtonState.down,
+          details.localPosition,
+        );
+      }
+      if (!handled || forceCallback) {
+        callback?.call(details);
+      }
+      return;
+    }
     callback?.call(details);
   }
 
@@ -149,9 +166,17 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
         // selection overlay. Don't poke the remote with a click that
         // would put it in a stale state for the next gesture.
         widget.terminalController.suppressNextTapMouseEvent = false;
+      } else if (details.kind == PointerDeviceKind.mouse) {
+        // andssh P9: mouse sent DOWN in _tapDown (upstream semantics);
+        // only the UP half is owed here.
+        renderTerminal.mouseEvent(
+          button,
+          TerminalMouseButtonState.up,
+          details.localPosition,
+        );
       } else {
-        // andssh P9: paired down+up so the app sees a complete click
-        // (since we skipped the down in _tapDown).
+        // andssh P9 (touch): we deferred the DOWN, so send both halves
+        // now as a paired click.
         renderTerminal.mouseEvent(
           button,
           TerminalMouseButtonState.down,

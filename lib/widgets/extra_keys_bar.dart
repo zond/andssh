@@ -105,11 +105,16 @@ class ExtraKeysBar extends StatelessWidget {
   }
 
   Widget _key(String label, VoidCallback onTap) {
-    return _RepeatKey(label: label, onPress: onTap);
+    return _RepeatKey(label: label, onPress: onTap, controller: controller);
   }
 
   Widget _arrow(String label, VoidCallback onTap) {
-    return _RepeatKey(label: label, onPress: onTap, circle: true);
+    return _RepeatKey(
+      label: label,
+      onPress: onTap,
+      controller: controller,
+      circle: true,
+    );
   }
 }
 
@@ -120,11 +125,13 @@ class _RepeatKey extends StatefulWidget {
   const _RepeatKey({
     required this.label,
     required this.onPress,
+    required this.controller,
     this.circle = false,
   });
 
   final String label;
   final VoidCallback onPress;
+  final ExtraKeysController controller;
   final bool circle;
 
   @override
@@ -136,9 +143,15 @@ class _RepeatKeyState extends State<_RepeatKey> {
   // ~50 ms between subsequent repeats.
   static const _initialDelay = Duration(milliseconds: 400);
   static const _repeatInterval = Duration(milliseconds: 50);
+  // Safety net: if a gesture-arena steal (or missed pointer-up) ever
+  // leaks past onPointerUp / onPointerCancel, time out the repeat
+  // after a minute rather than spin forever until dispose. A 60 s hold
+  // is far past any legitimate auto-repeat session.
+  static const _maxHoldDuration = Duration(seconds: 60);
 
   Timer? _delayTimer;
   Timer? _repeatTimer;
+  Timer? _holdTimeout;
 
   @override
   void dispose() {
@@ -147,11 +160,16 @@ class _RepeatKeyState extends State<_RepeatKey> {
   }
 
   void _start() {
+    // Tell the controller to snapshot modifiers and pause per-key
+    // auto-clear; every repeat during the hold reuses those modifiers
+    // and the whole hold counts as a single consume on release.
+    widget.controller.beginHold();
     widget.onPress();
     _delayTimer = Timer(_initialDelay, () {
       _repeatTimer =
           Timer.periodic(_repeatInterval, (_) => widget.onPress());
     });
+    _holdTimeout = Timer(_maxHoldDuration, _stop);
   }
 
   void _stop() {
@@ -159,6 +177,9 @@ class _RepeatKeyState extends State<_RepeatKey> {
     _delayTimer = null;
     _repeatTimer?.cancel();
     _repeatTimer = null;
+    _holdTimeout?.cancel();
+    _holdTimeout = null;
+    widget.controller.endHold();
   }
 
   @override
@@ -210,6 +231,18 @@ class ExtraKeysController extends ChangeNotifier
   bool _alt = false;
   bool _shift = false;
 
+  // Snapshot taken at the start of a held key. While a hold is active
+  // we reapply these on every repeat instead of using the current
+  // sticky state — otherwise the first repeat would consume the
+  // modifier and subsequent repeats would be plain (Ctrl+↓ once, then
+  // ↓ ↓ ↓ …). endHold() then collapses them back into a single
+  // consume, so the "sticky modifier clears on use" contract still
+  // holds across the whole hold.
+  bool _holding = false;
+  bool _heldCtrl = false;
+  bool _heldAlt = false;
+  bool _heldShift = false;
+
   bool get ctrl => _ctrl;
   bool get alt => _alt;
   bool get shift => _shift;
@@ -242,11 +275,37 @@ class ExtraKeysController extends ChangeNotifier
     }
   }
 
+  /// Called at the start of a press-and-hold on an auto-repeat key.
+  /// Captures the current sticky modifier state so each repeat during
+  /// the hold sees the same modifiers, and suppresses the per-key
+  /// auto-clear until [endHold] fires.
+  void beginHold() {
+    _holding = true;
+    _heldCtrl = _ctrl;
+    _heldAlt = _alt;
+    _heldShift = _shift;
+  }
+
+  /// Called on pointer-up/cancel at the end of a held key. Applies the
+  /// usual sticky-modifier clear that was deferred during the hold.
+  void endHold() {
+    if (!_holding) return;
+    _holding = false;
+    _consumeModifiers();
+  }
+
+  // During a hold we reuse the snapshotted modifiers on every call and
+  // skip _consumeModifiers; outside a hold we behave as before
+  // (apply-then-clear).
+  bool get _effCtrl => _holding ? _heldCtrl : _ctrl;
+  bool get _effAlt => _holding ? _heldAlt : _alt;
+  bool get _effShift => _holding ? _heldShift : _shift;
+
   void sendKey(TerminalKey key) {
     final t = _terminal;
     if (t == null) return;
-    t.keyInput(key, ctrl: _ctrl, alt: _alt, shift: _shift);
-    _consumeModifiers();
+    t.keyInput(key, ctrl: _effCtrl, alt: _effAlt, shift: _effShift);
+    if (!_holding) _consumeModifiers();
   }
 
   void sendFKey(int n) {
@@ -271,12 +330,12 @@ class ExtraKeysController extends ChangeNotifier
   void sendText(String text) {
     final t = _terminal;
     if (t == null) return;
-    if (text.length == 1 && (_ctrl || _alt)) {
-      t.charInput(text.codeUnitAt(0), ctrl: _ctrl, alt: _alt);
+    if (text.length == 1 && (_effCtrl || _effAlt)) {
+      t.charInput(text.codeUnitAt(0), ctrl: _effCtrl, alt: _effAlt);
     } else {
       t.textInput(text);
     }
-    _consumeModifiers();
+    if (!_holding) _consumeModifiers();
   }
 
   /// Injected as [Terminal.inputHandler] so sticky modifiers apply to every

@@ -97,6 +97,10 @@ class ConnectionsPage extends StatelessWidget {
         await sessions.disconnect(c.id);
         break;
       case _Action.delete:
+        // Capture the messenger up front — it's used only after awaits,
+        // and `ScaffoldMessenger.of(context)` after an async gap is the
+        // classic use-context-after-await lint.
+        final messenger = ScaffoldMessenger.of(context);
         final ok = await showDialog<bool>(
           context: context,
           builder: (_) => AlertDialog(
@@ -116,8 +120,14 @@ class ConnectionsPage extends StatelessWidget {
           ),
         );
         if (ok == true) {
-          await sessions.disconnect(c.id);
-          await store.delete(c.id);
+          try {
+            await sessions.disconnect(c.id);
+            await store.delete(c.id);
+          } catch (e) {
+            messenger.showSnackBar(
+              SnackBar(content: Text('Delete failed: $e')),
+            );
+          }
         }
         break;
     }

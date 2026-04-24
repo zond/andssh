@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 
@@ -59,7 +61,9 @@ class _RemoteFilePickerState extends State<RemoteFilePicker> {
   @override
   void initState() {
     super.initState();
-    _navigate(widget.initialPath);
+    // Fire-and-forget: _navigate itself handles errors by surfacing them
+    // in _error / setState, so we don't need to await it.
+    unawaited(_navigate(widget.initialPath));
   }
 
   Future<void> _navigate(String? path) async {
@@ -73,7 +77,7 @@ class _RemoteFilePickerState extends State<RemoteFilePicker> {
       // canonicalises whatever we pass in (resolving "..").
       final resolved = await widget.sftp.absolute(path ?? '.');
       final entries = await widget.sftp.listdir(resolved);
-      entries.removeWhere((e) => e.filename == '.' || e.filename == '..');
+      entries.removeWhere((e) => _isUnsafeFilename(e.filename));
       _sortEntries(entries);
       if (!mounted) return;
       setState(() {
@@ -88,6 +92,16 @@ class _RemoteFilePickerState extends State<RemoteFilePicker> {
         _loading = false;
       });
     }
+  }
+
+  /// Filters out "." and ".." (we render our own parent entry) and anything
+  /// a hostile SFTP server might return that would let a filename walk
+  /// outside the current directory if we join it naively — embedded "/",
+  /// NUL bytes, or empty strings.
+  static bool _isUnsafeFilename(String name) {
+    if (name.isEmpty || name == '.' || name == '..') return true;
+    if (name.contains('/') || name.contains('\x00')) return true;
+    return false;
   }
 
   static void _sortEntries(List<SftpName> list) {

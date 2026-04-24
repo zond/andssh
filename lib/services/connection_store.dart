@@ -36,12 +36,19 @@ class ConnectionStore extends ChangeNotifier {
     if (await f.exists()) {
       final raw = await f.readAsString();
       if (raw.isNotEmpty) {
-        final decoded = jsonDecode(raw) as List<dynamic>;
-        _connections
-          ..clear()
-          ..addAll(decoded.map(
-            (e) => SshConnection.fromJson(e as Map<String, dynamic>),
-          ));
+        try {
+          final decoded = jsonDecode(raw) as List<dynamic>;
+          _connections
+            ..clear()
+            ..addAll(decoded.map(
+              (e) => SshConnection.fromJson(e as Map<String, dynamic>),
+            ));
+        } catch (e) {
+          // Corrupted store — log and fall back to empty so the UI at
+          // least unblocks instead of spinning forever.
+          debugPrint('andssh: connections.json parse failed: $e');
+          _connections.clear();
+        }
       }
     }
     _loaded = true;
@@ -50,9 +57,15 @@ class ConnectionStore extends ChangeNotifier {
 
   Future<void> _persist() async {
     final f = await _file();
-    await f.writeAsString(
+    // Atomic write: stage to a sibling file and rename on top of the
+    // real one. A crash or kill mid-write then loses the new value
+    // rather than truncating the existing list to zero bytes.
+    final tmp = File('${f.path}.tmp');
+    await tmp.writeAsString(
       jsonEncode(_connections.map((c) => c.toJson()).toList()),
+      flush: true,
     );
+    await tmp.rename(f.path);
   }
 
   Future<void> upsert(SshConnection conn, {SshCredentials? creds}) async {

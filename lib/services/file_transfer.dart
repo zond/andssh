@@ -54,8 +54,14 @@ class TransferCancelled implements Exception {
 }
 
 /// Streams [local] to [remotePath] on the SFTP server. Creates the remote
-/// file (truncating if it already exists). The local file is read in
-/// chunks so memory usage stays bounded regardless of size.
+/// file (truncating if it already exists).
+///
+/// Uses [SftpFile.write], which starts an [SftpFileWriter] with built-in
+/// sliding-window flow control (it pauses the local stream when the
+/// remote hasn't acked enough). The previous implementation drove each
+/// 64-KiB chunk through `writeBytes` serially, which was simpler but
+/// also unbounded in in-flight requests and didn't back-pressure the
+/// local file stream at all.
 Future<void> uploadFile({
   required File local,
   required SftpClient sftp,
@@ -72,17 +78,35 @@ Future<void> uploadFile({
         SftpFileOpenMode.truncate,
   );
   try {
-    var offset = 0;
-    await for (final chunk in local.openRead()) {
-      if (controller.cancelled) throw const TransferCancelled();
-      final bytes =
-          chunk is Uint8List ? chunk : Uint8List.fromList(chunk);
-      await remote.writeBytes(bytes, offset: offset);
-      offset += bytes.length;
-      controller._advance(offset);
+    // File.openRead() yields List<int>; the writer wants Uint8List.
+    final stream = local.openRead().map(
+          (chunk) =>
+              chunk is Uint8List ? chunk : Uint8List.fromList(chunk),
+        );
+    final writer = remote.write(
+      stream,
+      onProgress: controller._advance,
+    );
+    // Forward cancellation: aborting the writer cancels the stream
+    // subscription, completes `writer.done`, and we treat that as a
+    // TransferCancelled.
+    void onCancel() {
+      if (controller.cancelled) unawaited(writer.abort());
     }
+    controller.addListener(onCancel);
+    try {
+      await writer.done;
+    } finally {
+      controller.removeListener(onCancel);
+    }
+    if (controller.cancelled) throw const TransferCancelled();
   } finally {
-    await remote.close();
+    // Swallow close errors — the original transfer exception (if any)
+    // is what the user needs to see; a follow-up close failure on a
+    // half-dead channel would otherwise mask it.
+    try {
+      await remote.close();
+    } catch (_) {}
   }
 }
 
@@ -111,9 +135,15 @@ Future<void> downloadFile({
         controller._advance(bytesWritten);
       }
     } finally {
-      await sink.close();
+      // Don't let a close-time error (e.g. disk-full flush) mask the
+      // actual cause of failure if one is already propagating out.
+      try {
+        await sink.close();
+      } catch (_) {}
     }
   } finally {
-    await remote.close();
+    try {
+      await remote.close();
+    } catch (_) {}
   }
 }

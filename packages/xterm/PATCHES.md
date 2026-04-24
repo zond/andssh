@@ -16,6 +16,12 @@ When rebasing onto a newer upstream release:
 
 ## Patches
 
+### P12 — `RenderTerminal.autoResize` is a runtime toggle, not just an initial flag (`lib/src/ui/render.dart`)
+
+Added a public `autoResize` getter and made the existing setter flush a pending resize on flip-to-true: while `autoResize` is false, `_resizeTerminalIfNeeded` short-circuits so `terminal.resize` — and therefore `Buffer.resize`'s reflow, which detaches every cell anchor — cannot run. When it flips back to true we call `_resizeTerminalIfNeeded` once to apply whatever viewport size the paused layouts computed.
+
+Why: the P8/P11 freeze holds SSH stdout, but a layout change in the host app (soft-keyboard animation settling, rotation, split-screen resize) still runs `RenderTerminal.performLayout`, which still calls `_updateViewportSize` → `_resizeTerminalIfNeeded` → `terminal.resize` — which reflows the buffer and detaches the anchors `selectWord` just created. The visible symptom was a long-press succeeding, the selection appearing for a frame, then vanishing as the keyboard animation crossed a cell boundary. andssh's `ActiveSession.freeze` / `unfreeze` now flip this gate so a selection is safe across layout changes.
+
 ### P11 — Fix aliasing bug in `IndexAwareCircularBuffer._adoptChild` (`lib/src/utils/circular_buffer.dart`)
 
 `Buffer.scrollDown` and `scrollUp` move lines within the buffer by assigning `this.lines[i] = this.lines[i - n]`. That reassignment goes through `_adoptChild`, which detaches whatever was at `[i]` and stores the source line there — but it *doesn't* clear the source slot `[i - n]`. The same `BufferLine` instance is now referenced from two array positions. A later iteration of the caller's loop then assigns something new to `[i - n]`, and `_adoptChild` there calls `_detach()` on the shared line — which nulls its `_owner` while it is still referenced at `[i]`.

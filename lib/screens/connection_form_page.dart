@@ -22,6 +22,12 @@ class _ConnectionFormPageState extends State<ConnectionFormPage> {
   final _password = TextEditingController();
   final _privateKey = TextEditingController();
   final _passphrase = TextEditingController();
+  // Editable host-key fields. The stored format is lowercase hex with
+  // no separators; the text box accepts and normalises several
+  // formats (with colons, with "MD5:" prefix, raw hex). Either field
+  // empty means "no pin" — the next connect will TOFU and populate.
+  late final TextEditingController _hostKeyType;
+  late final TextEditingController _hostKeyFp;
 
   late SshAuthMethod _authMethod;
   String? _jumpHostId;
@@ -36,6 +42,12 @@ class _ConnectionFormPageState extends State<ConnectionFormPage> {
     _host = TextEditingController(text: e?.host ?? '');
     _port = TextEditingController(text: e?.port.toString() ?? '22');
     _user = TextEditingController(text: e?.username ?? '');
+    _hostKeyType = TextEditingController(text: e?.hostKeyType ?? '');
+    _hostKeyFp = TextEditingController(
+      text: e?.hostKeyFingerprint == null
+          ? ''
+          : _formatFingerprint(e!.hostKeyFingerprint!),
+    );
     _authMethod = e?.authMethod ?? SshAuthMethod.password;
     _jumpHostId = e?.jumpHostId;
     _replaceCredentials = e == null; // new connection ⇒ must enter creds
@@ -50,6 +62,8 @@ class _ConnectionFormPageState extends State<ConnectionFormPage> {
     _password.dispose();
     _privateKey.dispose();
     _passphrase.dispose();
+    _hostKeyType.dispose();
+    _hostKeyFp.dispose();
     super.dispose();
   }
 
@@ -60,6 +74,13 @@ class _ConnectionFormPageState extends State<ConnectionFormPage> {
     try {
       final id = widget.existing?.id ??
           DateTime.now().microsecondsSinceEpoch.toString();
+      // Normalise on save: strip "MD5:" prefix, colons, whitespace; store
+      // as lowercase hex. Either field empty → stored as null (unpinned).
+      // Validation happens in _hostKeyFpValidator during the form's
+      // validate() call above.
+      final typeText = _hostKeyType.text.trim();
+      final fpText = _hostKeyFp.text;
+      final normFp = _normalizeFingerprint(fpText);
       final conn = SshConnection(
         id: id,
         name: _name.text.trim(),
@@ -68,6 +89,8 @@ class _ConnectionFormPageState extends State<ConnectionFormPage> {
         username: _user.text.trim(),
         authMethod: _authMethod,
         jumpHostId: _jumpHostId,
+        hostKeyType: typeText.isEmpty ? null : typeText,
+        hostKeyFingerprint: normFp,
       );
       final creds = _replaceCredentials
           ? SshCredentials(
@@ -187,6 +210,8 @@ class _ConnectionFormPageState extends State<ConnectionFormPage> {
                 onChanged: (v) => setState(() => _jumpHostId = v),
               ),
               const SizedBox(height: 24),
+              _buildHostKeyBlock(context),
+              const SizedBox(height: 24),
               if (widget.existing != null)
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
@@ -207,6 +232,97 @@ class _ConnectionFormPageState extends State<ConnectionFormPage> {
     );
   }
 
+  Widget _buildHostKeyBlock(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Host key (optional)', style: textTheme.labelLarge),
+        const SizedBox(height: 4),
+        Text(
+          'Leave blank to trust-on-first-connect. If both fields are '
+          'set, the next connect fails with a prompt if the server '
+          'presents a different key.',
+          style: textTheme.bodySmall,
+        ),
+        const SizedBox(height: 8),
+        TextFormField(
+          controller: _hostKeyType,
+          decoration: const InputDecoration(
+            labelText: 'Type',
+            hintText: 'e.g. ssh-ed25519, ssh-rsa',
+          ),
+          autocorrect: false,
+          enableSuggestions: false,
+        ),
+        TextFormField(
+          controller: _hostKeyFp,
+          decoration: const InputDecoration(
+            labelText: 'MD5 fingerprint',
+            hintText: 'ab:cd:…  /  MD5:ab:cd:…  /  raw hex',
+          ),
+          autocorrect: false,
+          enableSuggestions: false,
+          style: const TextStyle(fontFamily: 'monospace'),
+          validator: _hostKeyFpValidator,
+        ),
+        const SizedBox(height: 4),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton.icon(
+            icon: const Icon(Icons.clear, size: 18),
+            label: const Text('Clear (re-pin on next connect)'),
+            onPressed: () {
+              _hostKeyType.clear();
+              _hostKeyFp.clear();
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Accepts several user-friendly shapes for the fingerprint:
+  ///   * `ab:cd:ef:…` (ssh-keygen's default)
+  ///   * `MD5:ab:cd:…` (with the `MD5:` prefix OpenSSH prints)
+  ///   * `abcdef…` (raw hex)
+  /// After stripping prefix / colons / spaces the remaining string must
+  /// be 32 lowercase hex digits (16-byte MD5). Empty input is accepted
+  /// (means "no pin").
+  static String? _hostKeyFpValidator(String? v) {
+    if (v == null || v.trim().isEmpty) return null;
+    final hex = _stripFingerprint(v);
+    if (hex.length != 32) {
+      return 'Expected 32 hex chars after stripping colons / MD5: prefix';
+    }
+    if (!RegExp(r'^[0-9a-f]+$').hasMatch(hex)) {
+      return 'Non-hex characters in fingerprint';
+    }
+    return null;
+  }
+
+  static String? _normalizeFingerprint(String v) {
+    final hex = _stripFingerprint(v);
+    return hex.isEmpty ? null : hex;
+  }
+
+  static String _stripFingerprint(String v) {
+    var s = v.trim().toLowerCase();
+    if (s.startsWith('md5:')) s = s.substring(4);
+    return s.replaceAll(RegExp(r'[:\-\s]'), '');
+  }
+
+  /// Formats a stored lowercase-hex fingerprint for display as
+  /// `ab:cd:ef:…` — matches the ssh-keygen default output.
+  static String _formatFingerprint(String hex) {
+    final sb = StringBuffer();
+    for (var i = 0; i < hex.length; i += 2) {
+      if (i > 0) sb.write(':');
+      sb.write(hex.substring(i, i + 2));
+    }
+    return sb.toString();
+  }
+
   List<Widget> _credentialFields() {
     switch (_authMethod) {
       case SshAuthMethod.password:
@@ -215,6 +331,11 @@ class _ConnectionFormPageState extends State<ConnectionFormPage> {
             controller: _password,
             decoration: const InputDecoration(labelText: 'Password'),
             obscureText: true,
+            // Don't feed secrets to the IME's suggestion cache /
+            // predictive autocorrect / clipboard-suggestion bar.
+            autocorrect: false,
+            enableSuggestions: false,
+            keyboardType: TextInputType.visiblePassword,
             validator: (v) =>
                 (v == null || v.isEmpty) ? 'Required' : null,
           ),
@@ -229,6 +350,12 @@ class _ConnectionFormPageState extends State<ConnectionFormPage> {
             ),
             minLines: 4,
             maxLines: 10,
+            // Same reasoning as the password field; PEM isn't `obscureText`
+            // because users need to paste/edit it, but we still want no
+            // IME suggestions / autocorrect on private key material.
+            autocorrect: false,
+            enableSuggestions: false,
+            keyboardType: TextInputType.multiline,
             validator: (v) =>
                 (v == null || v.trim().isEmpty) ? 'Required' : null,
           ),
@@ -238,6 +365,9 @@ class _ConnectionFormPageState extends State<ConnectionFormPage> {
               labelText: 'Key passphrase (optional)',
             ),
             obscureText: true,
+            autocorrect: false,
+            enableSuggestions: false,
+            keyboardType: TextInputType.visiblePassword,
           ),
         ];
     }

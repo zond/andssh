@@ -11,7 +11,13 @@ import '../models/ssh_connection.dart';
 /// (EncryptedSharedPreferences), and every read is gated behind a
 /// fingerprint / device-credential prompt from local_auth.
 class SecretStore {
-  static const _storage = FlutterSecureStorage();
+  // flutter_secure_storage v10 migrated off Jetpack Security (now deprecated
+  // upstream) to its own Keystore-wrapped AEAD; `encryptedSharedPreferences`
+  // is accepted but ignored. `resetOnError` guards against a corrupt store
+  // bricking every read.
+  static const _storage = FlutterSecureStorage(
+    aOptions: AndroidOptions(resetOnError: true),
+  );
 
   final LocalAuthentication _auth = LocalAuthentication();
 
@@ -43,7 +49,7 @@ class SecretStore {
     if (!ok) {
       throw const BiometricAuthFailure();
     }
-    return SshCredentials.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    return _decodeOrDiscard(connectionId, raw);
   }
 
   /// Load without biometric prompt. Only use this for background reads like
@@ -52,7 +58,22 @@ class SecretStore {
   Future<SshCredentials?> loadUnlocked(String connectionId) async {
     final raw = await _storage.read(key: _keyFor(connectionId));
     if (raw == null) return null;
-    return SshCredentials.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    return _decodeOrDiscard(connectionId, raw);
+  }
+
+  /// Parses [raw] or, on failure, deletes the corrupted entry and returns
+  /// null so the caller can surface "missing credentials" and let the user
+  /// re-enter them rather than wedge on a JSON/shape error forever.
+  Future<SshCredentials?> _decodeOrDiscard(
+    String connectionId,
+    String raw,
+  ) async {
+    try {
+      return SshCredentials.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    } catch (_) {
+      await _storage.delete(key: _keyFor(connectionId));
+      return null;
+    }
   }
 
   Future<void> delete(String connectionId) async {

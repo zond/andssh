@@ -17,15 +17,22 @@ class TerminalSettingsPage extends StatefulWidget {
 }
 
 class _TerminalSettingsPageState extends State<TerminalSettingsPage> {
-  late final TextEditingController _columns;
+  final _columns = TextEditingController();
   final _form = GlobalKey<FormState>();
+  bool _seeded = false;
 
   @override
-  void initState() {
-    super.initState();
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Provider / InheritedWidget reads belong here, not initState. Seed
+    // the text field once on the first didChangeDependencies; subsequent
+    // inherited-widget changes (theme, locale, media-query) must not
+    // re-overwrite whatever the user is typing.
+    if (_seeded) return;
+    _seeded = true;
     final store = context.read<HostSettingsStore>();
     final current = store.get(widget.host).preferredColumns;
-    _columns = TextEditingController(text: current?.toString() ?? '');
+    _columns.text = current?.toString() ?? '';
   }
 
   @override

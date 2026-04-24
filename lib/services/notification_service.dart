@@ -83,6 +83,10 @@ class NotificationService {
           onlyAlertOnce: true,
           importance: Importance.low,
           priority: Priority.low,
+          // Hide content on secure lockscreens — the system shows a
+          // "Notification hidden" placeholder instead of our title /
+          // host / username. Full content is visible once unlocked.
+          visibility: NotificationVisibility.private,
           groupKey: _groupKey,
           actions: <AndroidNotificationAction>[
             AndroidNotificationAction(
@@ -131,6 +135,9 @@ class NotificationService {
       onlyAlertOnce: true,
       importance: Importance.low,
       priority: Priority.low,
+      // Lockscreen privacy: system shows a placeholder instead of
+      // host/username until the device is unlocked.
+      visibility: NotificationVisibility.private,
       groupKey: _groupKey,
       setAsGroupSummary: sessions.length > 1,
       actions: single != null
@@ -167,12 +174,16 @@ class NotificationService {
   int _idFor(String connectionId) =>
       _notificationId + 1 + connectionId.hashCode.abs() % 10000;
 
-  void _handleResponse(NotificationResponse response) async {
+  Future<void> _handleResponse(NotificationResponse response) async {
     final actionId = response.actionId;
     if (actionId != null && actionId.startsWith('disconnect:')) {
       final id = actionId.substring('disconnect:'.length);
       _log('notification disconnect action for $id');
-      await _manager?.disconnect(id);
+      try {
+        await _manager?.disconnect(id);
+      } catch (e) {
+        _log('disconnect from notification failed: $e');
+      }
       return;
     }
     final payload = response.payload;

@@ -27,15 +27,20 @@ class HostSettingsStore extends ChangeNotifier {
     if (await f.exists()) {
       final raw = await f.readAsString();
       if (raw.isNotEmpty) {
-        final decoded = jsonDecode(raw) as Map<String, dynamic>;
-        _prefs
-          ..clear()
-          ..addEntries(decoded.entries.map(
-            (e) => MapEntry(
-              e.key,
-              HostPreferences.fromJson(e.value as Map<String, dynamic>),
-            ),
-          ));
+        try {
+          final decoded = jsonDecode(raw) as Map<String, dynamic>;
+          _prefs
+            ..clear()
+            ..addEntries(decoded.entries.map(
+              (e) => MapEntry(
+                e.key,
+                HostPreferences.fromJson(e.value as Map<String, dynamic>),
+              ),
+            ));
+        } catch (e) {
+          debugPrint('andssh: host_settings.json parse failed: $e');
+          _prefs.clear();
+        }
       }
     }
     _loaded = true;
@@ -44,9 +49,12 @@ class HostSettingsStore extends ChangeNotifier {
 
   Future<void> _persist() async {
     final f = await _file();
-    await f.writeAsString(
+    final tmp = File('${f.path}.tmp');
+    await tmp.writeAsString(
       jsonEncode(_prefs.map((k, v) => MapEntry(k, v.toJson()))),
+      flush: true,
     );
+    await tmp.rename(f.path);
   }
 
   Future<void> update(String host, HostPreferences prefs) async {

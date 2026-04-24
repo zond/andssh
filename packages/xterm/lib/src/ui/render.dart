@@ -86,9 +86,21 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   }
 
   bool _autoResize;
+  bool get autoResize => _autoResize;
+
+  // andssh P12: flipping autoResize to false pauses the local
+  // Buffer.resize path entirely, so layout changes during a selection
+  // freeze (keyboard show/hide, rotation) can't reflow the buffer and
+  // invalidate the currently-selected cell anchors. Flipping back to
+  // true flushes whatever viewport size the paused layouts computed,
+  // so the terminal catches up in one shot on unfreeze rather than on
+  // the next organic layout.
   set autoResize(bool value) {
     if (value == _autoResize) return;
     _autoResize = value;
+    if (value) {
+      _resizeTerminalIfNeeded();
+    }
     markNeedsLayout();
   }
 

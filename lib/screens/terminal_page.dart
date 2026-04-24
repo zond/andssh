@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:developer' as developer;
 import 'dart:io';
 
+import 'package:dartssh2/dartssh2.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -11,9 +12,12 @@ import 'package:xterm/xterm.dart';
 
 import '../models/host_preferences.dart';
 import '../models/ssh_connection.dart';
+import '../services/connection_store.dart';
 import '../services/file_transfer.dart';
 import '../services/host_settings_store.dart';
+import '../services/sensitive_clipboard.dart';
 import '../services/session_manager.dart';
+import '../services/ssh_connector.dart';
 import '../widgets/extra_keys_bar.dart';
 import '../widgets/remote_file_picker.dart';
 import '../widgets/terminal_selection_handles.dart';
@@ -89,6 +93,14 @@ class _TerminalPageState extends State<TerminalPage> {
   CellOffset? _startHandleFixedEnd;
   CellOffset? _endHandleFixedStart;
 
+  // Computed teardrop positions in the body-stack's coordinate space.
+  // Derived from the current selection by _recomputeHandlePositions,
+  // which runs in a post-frame callback (render objects are laid out by
+  // then) — build() just reads these, avoiding the rebuild-from-build
+  // anti-pattern of the previous implementation.
+  Offset? _startHandlePos;
+  Offset? _endHandlePos;
+
   @override
   void initState() {
     super.initState();
@@ -107,23 +119,93 @@ class _TerminalPageState extends State<TerminalPage> {
   }
 
   void _onSelectionChanged() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    // The selection changed (created, extended via handle, or cleared).
+    // Teardrop positions depend on RenderTerminal.localToGlobal +
+    // the body Stack's global-to-local — those render objects are laid
+    // out by the start of the next frame, so compute positions in a
+    // post-frame callback and store them. build() is then a pure read.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _recomputeHandlePositions();
+    });
+    // Also trigger an immediate rebuild so AppBar state (Copy/✕) and
+    // the selection highlight react to the underlying controller event.
+    setState(() {});
+  }
+
+  void _recomputeHandlePositions() {
+    final sel = _termCtrl.selection;
+    Offset? start;
+    Offset? end;
+    if (sel != null) {
+      start = _cellToStackOffset(sel.normalized.begin);
+      end = _cellToStackOffset(sel.normalized.end);
+    }
+    if (start == _startHandlePos && end == _endHandlePos) return;
+    setState(() {
+      _startHandlePos = start;
+      _endHandlePos = end;
+    });
   }
 
   Future<void> _start() async {
     final manager = context.read<SessionManager>();
+    final connStore = context.read<ConnectionStore>();
+    // Re-read from the store each attempt. widget.connection is the
+    // `final` object captured by the constructor; when we persist a
+    // re-pinned host key and retry, the updated fingerprint lives in the
+    // store but not on widget.connection. Using the store copy avoids
+    // the mismatch → re-pin → retry-with-stale → mismatch loop.
+    final target = connStore.byId(widget.connection.id) ?? widget.connection;
     try {
-      final existing = manager.get(widget.connection.id);
+      final existing = manager.get(target.id);
       if (existing != null) {
         _attach(existing);
         return;
       }
       final s = await manager.openOrReuse(
-        widget.connection,
+        target,
         onProgress: (line) => _pending.write('$line\r\n'),
+        onHostKeyObserved: (hop, type, fingerprintHex) {
+          // Trust-on-first-use: persist the fingerprint we saw so the
+          // next connect can verify against it. unawaited is fine — the
+          // store's update is fast and the main flow doesn't block.
+          unawaited(connStore.upsert(
+            hop.copyWith(
+              hostKeyType: type,
+              hostKeyFingerprint: fingerprintHex,
+            ),
+          ));
+        },
       );
       if (!mounted) return;
       _attach(s);
+    } on HostKeyMismatchError catch (e) {
+      if (!mounted) return;
+      final accepted = await _promptHostKeyMismatch(e);
+      if (!mounted) return;
+      if (accepted == true) {
+        // User chose to re-pin. Update the stored connection, then retry
+        // by looping through _start — clearing the latch so the retry
+        // proceeds instead of no-op'ing on _starting.
+        await connStore.upsert(
+          e.hop.copyWith(
+            hostKeyType: e.observedType,
+            hostKeyFingerprint: e.observedFingerprint,
+          ),
+        );
+        if (!mounted) return;
+        setState(() => _starting = false);
+        unawaited(_start());
+        return;
+      }
+      setState(() {
+        _status = 'Host key mismatch — aborted.';
+        _failed = true;
+        _starting = false;
+      });
+      _pending.write('\r\nHost key mismatch: connection aborted.\r\n');
     } catch (e, st) {
       developer.log('connect failed',
           name: 'andssh', error: e, stackTrace: st);
@@ -131,14 +213,88 @@ class _TerminalPageState extends State<TerminalPage> {
       setState(() {
         _status = 'Failed: $e';
         _failed = true;
+        // Clear the latch so a future retry path (e.g. a "Retry" button)
+        // can call _start() again; without this the second attempt sees
+        // _starting=true and no-ops.
+        _starting = false;
       });
       _pending.write('\r\nConnection failed: $e\r\n');
     }
   }
 
+  /// Modal dialog shown when the server presents a host key different
+  /// from the one pinned on the connection. Returns true if the user
+  /// chose to re-pin (trust the new key).
+  Future<bool?> _promptHostKeyMismatch(HostKeyMismatchError e) {
+    String format(String type, String hex) {
+      // ab:cd:ef:... display format, matching ssh-keygen for MD5.
+      final sb = StringBuffer();
+      for (var i = 0; i < hex.length; i += 2) {
+        if (i > 0) sb.write(':');
+        sb.write(hex.substring(i, i + 2));
+      }
+      return '$type  MD5:$sb';
+    }
+
+    return showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Host key changed'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('The server at ${e.hop.host}:${e.hop.port} is presenting '
+                'a host key different from the one pinned on this '
+                'connection. This can mean the server was reinstalled — '
+                'or that someone is intercepting the connection.'),
+            const SizedBox(height: 12),
+            Text('Pinned:',
+                style: Theme.of(ctx).textTheme.labelLarge),
+            SelectableText(
+              format(e.pinnedType ?? '(unknown)', e.pinnedFingerprint),
+              style: const TextStyle(fontFamily: 'monospace'),
+            ),
+            const SizedBox(height: 8),
+            Text('Presented now:',
+                style: Theme.of(ctx).textTheme.labelLarge),
+            SelectableText(
+              format(e.observedType, e.observedFingerprint),
+              style: const TextStyle(fontFamily: 'monospace'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Abort'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Re-pin & connect'),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _attach(ActiveSession s) {
     s.terminal.onTitleChange = (t) {
       if (mounted) setState(() => _title = t);
+    };
+    // A width change triggers xterm's reflow, which detaches every anchor
+    // — our selection handles would point at stale cells. Drop the whole
+    // selection-mode UI on width change so the user doesn't see zombie
+    // teardrops.
+    s.onWidthChange = () {
+      if (_isFrozen) _dismissSelection();
+    };
+    // P12 gate: during a selection freeze we pause RenderTerminal's
+    // auto-resize so a layout change (keyboard show/hide, rotation)
+    // can't run Buffer.resize and detach the anchors we just created.
+    s.onAutoResizeGate = (enabled) {
+      _viewKey.currentState?.renderTerminal.autoResize = enabled;
     };
     setState(() {
       _session = s;
@@ -170,8 +326,6 @@ class _TerminalPageState extends State<TerminalPage> {
     if (text == null || text.isEmpty) return;
     terminal.paste(text);
   }
-
-  Future<void> _copyCaptured() => _copyAndUnfreeze();
 
   // ── File transfer ─────────────────────────────────────────────────────────
 
@@ -211,6 +365,51 @@ class _TerminalPageState extends State<TerminalPage> {
         ? '$remoteDir${picked.name}'
         : '$remoteDir/${picked.name}';
 
+    // Overwrite / symlink handling:
+    //   * If nothing exists at the target, proceed.
+    //   * If a directory exists, refuse.
+    //   * If a regular file exists, confirm overwrite.
+    //   * If a symlink exists, confirm overwrite AND delete the symlink
+    //     first so the subsequent create-write-truncate writes to the
+    //     user-chosen path, not to whatever the symlink pointed at.
+    SftpFileAttrs? existing;
+    try {
+      existing = await sftp.stat(remotePath, followLink: false);
+    } on SftpStatusError catch (e) {
+      if (e.code != SftpStatusCode.noSuchFile) rethrow;
+      existing = null;
+    }
+    if (!mounted) return;
+    if (existing != null) {
+      final type = existing.mode?.type;
+      if (type == SftpFileType.directory) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('"$remotePath" is a directory')),
+        );
+        return;
+      }
+      final isLink = type == SftpFileType.symbolicLink;
+      final proceed = await _confirmOverwrite(
+        isSymlink: isLink,
+        path: remotePath,
+      );
+      if (proceed != true || !mounted) return;
+      if (isLink) {
+        // Remove the symlink itself; the follow-up open(create|truncate|write)
+        // will then create a real file at remotePath instead of truncating
+        // whatever the link pointed at.
+        try {
+          await sftp.remove(remotePath);
+        } catch (e) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Failed to remove existing link: $e')),
+          );
+          return;
+        }
+      }
+    }
+
     await _runTransfer(
       title: 'Uploading',
       filename: picked.name,
@@ -219,6 +418,34 @@ class _TerminalPageState extends State<TerminalPage> {
         sftp: sftp,
         remotePath: remotePath,
         controller: c,
+      ),
+    );
+  }
+
+  Future<bool?> _confirmOverwrite({
+    required bool isSymlink,
+    required String path,
+  }) {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(isSymlink ? 'Overwrite symlink?' : 'Overwrite file?'),
+        content: Text(
+          isSymlink
+              ? '"$path" is a symlink. Uploading will replace the symlink '
+                  'itself with the new file. The link target is left untouched.'
+              : '"$path" already exists on the remote. Overwrite?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Overwrite'),
+          ),
+        ],
       ),
     );
   }
@@ -260,14 +487,45 @@ class _TerminalPageState extends State<TerminalPage> {
     final localPath =
         localDir.endsWith('/') ? '$localDir$remoteName' : '$localDir/$remoteName';
 
+    // Symmetric with upload: if something already lives at the chosen
+    // local path, ask before clobbering. We just check File.exists()
+    // here — SAF-backed paths on Android still resolve through the
+    // normal filesystem API after FilePicker.getDirectoryPath returns.
+    final local = File(localPath);
+    if (await local.exists() && mounted) {
+      final proceed = await _confirmLocalOverwrite(localPath);
+      if (proceed != true || !mounted) return;
+    }
+    if (!mounted) return;
+
     await _runTransfer(
       title: 'Downloading',
       filename: remoteName,
       action: (c) => downloadFile(
         sftp: sftp,
         remotePath: remotePath,
-        local: File(localPath),
+        local: local,
         controller: c,
+      ),
+    );
+  }
+
+  Future<bool?> _confirmLocalOverwrite(String path) {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Overwrite file?'),
+        content: Text('"$path" already exists on this device. Overwrite?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Overwrite'),
+          ),
+        ],
       ),
     );
   }
@@ -275,7 +533,8 @@ class _TerminalPageState extends State<TerminalPage> {
   /// Shows a modal [TransferProgressDialog] while [action] runs, and
   /// surfaces the outcome (done / cancelled / error) via SnackBar. The
   /// dialog is always popped once [action] resolves, regardless of which
-  /// way it finished.
+  /// way it finished — and only the dialog, not whatever else might have
+  /// been pushed onto the root navigator in the meantime.
   Future<void> _runTransfer({
     required String title,
     required String filename,
@@ -284,14 +543,21 @@ class _TerminalPageState extends State<TerminalPage> {
     final controller = TransferController(filename: filename);
     final transfer = action(controller);
 
-    // Show the dialog without awaiting it — it stays up until we pop.
+    // Capture the dialog's own BuildContext so we pop *this* route, not
+    // whatever happens to be on top of the root navigator when the
+    // transfer resolves (the user could have backgrounded, pushed the
+    // settings page, etc.).
+    BuildContext? dialogContext;
     unawaited(showDialog<void>(
       context: context,
       barrierDismissible: false,
-      builder: (_) => TransferProgressDialog(
-        controller: controller,
-        title: title,
-      ),
+      builder: (ctx) {
+        dialogContext = ctx;
+        return TransferProgressDialog(
+          controller: controller,
+          title: title,
+        );
+      },
     ));
 
     String? message;
@@ -304,15 +570,31 @@ class _TerminalPageState extends State<TerminalPage> {
       message = 'Transfer failed: $e';
     }
 
+    // Pop the dialog via its own context; no-op if it was already popped.
+    final dctx = dialogContext;
+    if (dctx != null && dctx.mounted) {
+      Navigator.of(dctx).pop();
+    }
     if (!mounted) return;
-    // Pop the progress dialog.
-    Navigator.of(context, rootNavigator: true).pop();
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  /// Returns the basename of [path] (the segment after the last `/`).
+  /// Defence-in-depth for the SFTP side: if the name would otherwise
+  /// escape the caller's chosen local directory (`.`, `..`, embedded
+  /// separator or NUL that slipped past the RemoteFilePicker filter),
+  /// fall back to a generic name so the join becomes `$dir/download`.
   static String _basename(String path) {
     final i = path.lastIndexOf('/');
-    return i < 0 ? path : path.substring(i + 1);
+    final name = i < 0 ? path : path.substring(i + 1);
+    if (name.isEmpty ||
+        name == '.' ||
+        name == '..' ||
+        name.contains('/') ||
+        name.contains('\x00')) {
+      return 'download';
+    }
+    return name;
   }
 
   static String _dirname(String path) {
@@ -372,7 +654,10 @@ class _TerminalPageState extends State<TerminalPage> {
       if (raw.trim().isNotEmpty) text = raw;
     }
     if (text != null && text.isNotEmpty) {
-      await Clipboard.setData(ClipboardData(text: text));
+      // Mark the clip as sensitive on API 33+ so Android hides its
+      // paste-toast preview — terminal output can easily include
+      // secrets (`echo $TOKEN`, credential prompts).
+      await SensitiveClipboard.setData(text);
     }
     if (!mounted) return;
     _termCtrl.clearSelection();
@@ -473,29 +758,21 @@ class _TerminalPageState extends State<TerminalPage> {
     return stackBox.globalToLocal(rt.localToGlobal(localInRt));
   }
 
-  // Builds the Positioned teardrop handles for the current selection.
-  // Called from build() when frozen + hasSelection. Computes positions
-  // directly from RenderTerminal so we don't depend on LayerLink / the
-  // CompositedTransformFollower anchor math.
+  // Pure read of [_startHandlePos] / [_endHandlePos] (populated by
+  // _recomputeHandlePositions from the post-frame callback on every
+  // selection change). If the positions haven't been computed yet, the
+  // first frame shows no handles and _recomputeHandlePositions produces
+  // them on the following frame.
   List<Widget> _buildHandles() {
-    final sel = _termCtrl.selection;
-    if (sel == null) return const [];
-    final startStack = _cellToStackOffset(sel.normalized.begin);
-    final endStack = _cellToStackOffset(sel.normalized.end);
-    if (startStack == null || endStack == null) {
-      // Render objects not ready yet — schedule a rebuild after layout so
-      // the handles appear on the next frame.
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) setState(() {});
-      });
-      return const [];
-    }
+    final start = _startHandlePos;
+    final end = _endHandlePos;
+    if (start == null || end == null) return const [];
     const size = TerminalSelectionHandle.size;
     return [
       // Start handle: tip (top-right corner) sits at the selection start.
       Positioned(
-        left: startStack.dx - size,
-        top: startStack.dy,
+        left: start.dx - size,
+        top: start.dy,
         child: TerminalSelectionHandle(
           isStart: true,
           onPanStart: _onStartHandlePanStart,
@@ -505,8 +782,8 @@ class _TerminalPageState extends State<TerminalPage> {
       ),
       // End handle: tip (top-left corner) sits at the selection end.
       Positioned(
-        left: endStack.dx,
-        top: endStack.dy,
+        left: end.dx,
+        top: end.dy,
         child: TerminalSelectionHandle(
           isStart: false,
           onPanStart: _onEndHandlePanStart,
@@ -644,7 +921,7 @@ class _TerminalPageState extends State<TerminalPage> {
               IconButton(
                 icon: const Icon(Icons.copy),
                 tooltip: 'Copy selection',
-                onPressed: _copyCaptured,
+                onPressed: _copyAndUnfreeze,
               ),
             IconButton(
               icon: const Icon(Icons.close),

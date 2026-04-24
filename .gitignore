@@ -43,3 +43,9 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Release signing — keystore and credentials live outside the repo.
+# The release workflow reconstructs these from GitHub secrets at build
+# time. See android/key.properties.example for the expected format.
+/android/key.properties
+/android/app/upload-keystore.jks

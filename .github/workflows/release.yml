@@ -45,6 +45,31 @@ jobs:
       - name: Flutter analyze
         run: flutter analyze
 
+      - name: Reconstruct release signing material
+        # Decodes the base64 keystore into android/app/upload-keystore.jks
+        # and writes android/key.properties from the other three secrets.
+        # If the keystore secret isn't configured we skip and let
+        # android/app/build.gradle.kts fall back to the default debug
+        # keystore (APK is then not distributable, but the build still
+        # runs — useful for testing the workflow itself).
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "No ANDROID_KEYSTORE_BASE64 configured; build will use the debug keystore."
+            exit 0
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > android/app/upload-keystore.jks
+          cat > android/key.properties <<EOF
+          storePassword=$KEYSTORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          keyAlias=$KEY_ALIAS
+          storeFile=upload-keystore.jks
+          EOF
+
       - name: Build release APK
         run: flutter build apk --release
 

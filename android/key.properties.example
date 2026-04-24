@@ -1,0 +1,16 @@
+# Signing config for release builds. Copy this file to `android/key.properties`
+# (gitignored) and fill in the real values, then drop the keystore at
+# `android/app/upload-keystore.jks`.
+#
+# If `android/key.properties` is missing, build.gradle.kts falls back to the
+# default Flutter debug keystore, so committed-tree builds still work for
+# anyone who doesn't have the signing material.
+#
+# In CI, the release workflow writes this file from GitHub secrets
+# (ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_PASSWORD, ANDROID_KEY_ALIAS) and
+# decodes the keystore from ANDROID_KEYSTORE_BASE64 into upload-keystore.jks.
+
+storePassword=your-keystore-password
+keyPassword=your-key-password
+keyAlias=upload
+storeFile=upload-keystore.jks

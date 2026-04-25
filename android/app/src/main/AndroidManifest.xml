@@ -47,6 +47,13 @@
             android:exported="false"
             android:stopWithTask="false"
             android:foregroundServiceType="dataSync" />
+        <!-- Receives notification action-button taps (Disconnect). The
+             plugin's own manifest doesn't declare this — host apps must
+             register it themselves, otherwise Android drops the broadcast
+             and the action button is a no-op. -->
+        <receiver
+            android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver"
+            android:exported="false" />
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

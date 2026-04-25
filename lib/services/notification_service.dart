@@ -1,4 +1,7 @@
+import 'dart:async';
 import 'dart:developer' as developer;
+import 'dart:isolate';
+import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -13,6 +16,13 @@ const _channelDesc = 'Ongoing notification while andssh has open connections';
 const _groupKey = 'andssh_sessions';
 const _notificationId = 4201;
 
+// Process-global name used by the notification action receiver isolate to
+// reach the main isolate's SessionManager. flutter_local_notifications
+// always routes action-button taps through a separate background isolate
+// — even when the app is foregrounded — so the foreground response
+// callback never sees them. We bridge across isolates via IsolateNameServer.
+const _actionPortName = 'andssh_notification_actions';
+
 /// Maintains a single summary notification that lists every active
 /// session, plus one entry per session with a "Disconnect" action. Taps
 /// and action taps are delivered to [onOpen]/[onDisconnect].
@@ -23,6 +33,8 @@ class NotificationService {
   SessionManager? _manager;
   ValueChanged<String>? _onOpen;
   bool _fgRunning = false;
+  ReceivePort? _actionPort;
+  StreamSubscription<dynamic>? _actionSub;
 
   Future<void> initialize({
     required SessionManager manager,
@@ -30,6 +42,14 @@ class NotificationService {
   }) async {
     _manager = manager;
     _onOpen = onOpen;
+
+    // Bridge from the action-receiver isolate. Drop any previously
+    // registered SendPort first — hot restart leaves stale mappings around.
+    IsolateNameServer.removePortNameMapping(_actionPortName);
+    final port = ReceivePort();
+    IsolateNameServer.registerPortWithName(port.sendPort, _actionPortName);
+    _actionPort = port;
+    _actionSub = port.listen(_handleActionMessage);
 
     const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
     await _plugin.initialize(
@@ -49,8 +69,26 @@ class NotificationService {
 
   Future<void> dispose() async {
     _manager?.removeListener(_refresh);
+    await _actionSub?.cancel();
+    _actionSub = null;
+    _actionPort?.close();
+    _actionPort = null;
+    IsolateNameServer.removePortNameMapping(_actionPortName);
     await _stopForegroundService();
     await _plugin.cancelAll();
+  }
+
+  void _handleActionMessage(dynamic message) {
+    if (message is! Map) return;
+    if (message['kind'] == 'disconnect') {
+      final id = message['id'];
+      if (id is! String) return;
+      _log('disconnect routed from notification action: $id');
+      unawaited(_manager?.disconnect(id).catchError((Object e) {
+            _log('disconnect from notification failed: $e');
+          }) ??
+          Future<void>.value());
+    }
   }
 
   Future<void> _refresh() async {
@@ -195,13 +233,30 @@ class NotificationService {
   }
 }
 
-// Top-level entry point required by flutter_local_notifications for
-// action taps while the app is backgrounded. The actual dispatch is done
-// by the foreground callback once the app rehydrates and reconnects the
-// SessionManager, so here we just log; a future foreground-service
-// implementation can fan out directly to a background isolate.
+// Top-level entry point required by flutter_local_notifications. Runs in
+// a background isolate spawned by ActionBroadcastReceiver — even when the
+// app is foregrounded, action-button taps land here rather than in the
+// foreground response callback. We forward "disconnect" actions to the
+// main isolate via IsolateNameServer; the SessionManager lives there and
+// owns the SSH session we need to close.
 @pragma('vm:entry-point')
 void notificationTapBackground(NotificationResponse response) {
+  final actionId = response.actionId;
+  if (actionId != null && actionId.startsWith('disconnect:')) {
+    final id = actionId.substring('disconnect:'.length);
+    final port = IsolateNameServer.lookupPortByName(_actionPortName);
+    if (port == null) {
+      if (kDebugMode) {
+        developer.log(
+          'background disconnect for $id: main isolate port missing',
+          name: 'andssh',
+        );
+      }
+      return;
+    }
+    port.send(<String, String>{'kind': 'disconnect', 'id': id});
+    return;
+  }
   if (kDebugMode) {
     developer.log(
       'background notification response: actionId=${response.actionId} '

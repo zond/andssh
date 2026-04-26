@@ -50,8 +50,14 @@ class _TerminalPageState extends State<TerminalPage> {
   bool _starting = false;
 
   // Touch-to-wheel state for mouse-reporting mode (tmux, less, vim …).
-  // Step tuned for tmux defaults: ~50 px per wheel tick feels 1:1.
-  static const double _wheelStep = 50;
+  // Step is the current cell row height — one wheel notch per row of
+  // finger travel matches what tmux's copy-mode scrolls per notch
+  // (one line), giving a 1:1 finger-to-content mapping. Falls back to
+  // 20 px before the renderer is available.
+  static const double _wheelStepFallback = 20;
+  double get _wheelStep =>
+      _viewKey.currentState?.renderTerminal.cellSize.height ??
+          _wheelStepFallback;
   double _scrollAccum = 0;
   // Minimum total distance a finger must have moved from its pointer-down
   // position before we start translating movement into wheel events. This
@@ -826,9 +832,10 @@ class _TerminalPageState extends State<TerminalPage> {
       _wheelArmed = true;
     }
     _scrollAccum += event.delta.dy;
-    while (_scrollAccum.abs() >= _wheelStep) {
+    final step = _wheelStep;
+    while (_scrollAccum.abs() >= step) {
       final isWheelUp = _scrollAccum > 0;
-      _scrollAccum += isWheelUp ? -_wheelStep : _wheelStep;
+      _scrollAccum += isWheelUp ? -step : step;
       session.terminal.mouseInput(
         isWheelUp
             ? TerminalMouseButton.wheelUp

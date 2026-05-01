@@ -838,8 +838,16 @@ class _TerminalPageState extends State<TerminalPage> {
         return;
       }
       _wheelArmed = true;
+      // Seed the accumulator with the full pre-arm dy so total wheel
+      // emissions track total finger travel, not how the events arrived.
+      // Without this, a fast first event lands its whole delta in
+      // _scrollAccum (after the threshold check), but a slow drag's
+      // pre-threshold dy is silently discarded — so faster drags emit
+      // more wheel notches per cm of finger movement than slow ones.
+      _scrollAccum = dy;
+    } else {
+      _scrollAccum += event.delta.dy;
     }
-    _scrollAccum += event.delta.dy;
     final step = _wheelStep;
     if (step <= 0) return;
     while (_scrollAccum.abs() >= step) {

@@ -66,6 +66,12 @@ class _TerminalPageState extends State<TerminalPage> {
   static const double _wheelMoveThreshold = 24;
   Offset? _pointerDownPos;
   bool _wheelArmed = false;
+  // Pointer id of the active drag finger. We only accumulate wheel deltas
+  // from this single pointer — secondary touches (palm contact, second
+  // finger) on a multi-touch screen would otherwise contribute their own
+  // delta.dy to _scrollAccum and produce phantom wheel events in either
+  // direction, which the user sees as a sudden mid-drag jump.
+  int? _wheelPointerId;
 
   // ── Freeze / selection state ─────────────────────────────────────────────
   //
@@ -811,6 +817,8 @@ class _TerminalPageState extends State<TerminalPage> {
 
   void _onPointerMove(PointerMoveEvent event) {
     if (event.kind != PointerDeviceKind.touch) return;
+    // Only honour moves from the primary drag pointer — see _wheelPointerId.
+    if (_wheelPointerId != null && event.pointer != _wheelPointerId) return;
     final session = _session;
     if (session == null) return;
     if (!_reportsMouse) return;
@@ -833,6 +841,7 @@ class _TerminalPageState extends State<TerminalPage> {
     }
     _scrollAccum += event.delta.dy;
     final step = _wheelStep;
+    if (step <= 0) return;
     while (_scrollAccum.abs() >= step) {
       final isWheelUp = _scrollAccum > 0;
       _scrollAccum += isWheelUp ? -step : step;
@@ -847,7 +856,12 @@ class _TerminalPageState extends State<TerminalPage> {
   }
 
   void _onPointerUp(PointerUpEvent event) {
-    _scrollAccum = 0;
+    if (event.pointer == _wheelPointerId) {
+      _wheelPointerId = null;
+      _scrollAccum = 0;
+      _wheelArmed = false;
+      _pointerDownPos = null;
+    }
     if (!_isFrozen) return;
     if (_longPressGestureActive) {
       // Long-press gesture ended: snapshot the selection for the Copy button
@@ -879,7 +893,12 @@ class _TerminalPageState extends State<TerminalPage> {
   }
 
   void _onPointerCancel(PointerCancelEvent event) {
-    _scrollAccum = 0;
+    if (event.pointer == _wheelPointerId) {
+      _wheelPointerId = null;
+      _scrollAccum = 0;
+      _wheelArmed = false;
+      _pointerDownPos = null;
+    }
     _longPressGestureActive = false;
     if (_isFrozen) _dismissSelection();
   }
@@ -1026,6 +1045,12 @@ class _TerminalPageState extends State<TerminalPage> {
               Expanded(
                 child: Listener(
                   onPointerDown: (e) {
+                    if (e.kind != PointerDeviceKind.touch) return;
+                    // First finger down arms wheel emission; ignore later
+                    // simultaneous pointers so a second touch can't reset
+                    // the in-flight drag's accumulator.
+                    if (_wheelPointerId != null) return;
+                    _wheelPointerId = e.pointer;
                     _pointerDownPos = e.localPosition;
                     _wheelArmed = false;
                     _scrollAccum = 0;
@@ -1036,7 +1061,7 @@ class _TerminalPageState extends State<TerminalPage> {
                   child: LayoutBuilder(
                     builder: (context, constraints) {
                       final style = _styleFor(constraints.maxWidth, prefs);
-                      return TerminalView(
+                      final view = TerminalView(
                         terminal,
                         key: _viewKey,
                         controller: _termCtrl,
@@ -1050,6 +1075,21 @@ class _TerminalPageState extends State<TerminalPage> {
                         onLongPressStart:
                             session != null ? _onLongPressStart : null,
                         textStyle: style,
+                      );
+                      // When the remote is mouse-aware (tmux + TUI app),
+                      // we feed wheel events to it ourselves from the
+                      // outer Listener. Disable the inner Scrollable's
+                      // drag recognizer so it doesn't also chase the
+                      // touch — its drag callbacks fire alongside ours,
+                      // and on subsequent drags the residual scroll
+                      // activity manifests as mid-drag jumps the user
+                      // doesn't expect. In non-mouse-mode (plain shell)
+                      // we keep the default physics so scrollback drag
+                      // still works.
+                      if (!_reportsMouse) return view;
+                      return ScrollConfiguration(
+                        behavior: const _NoUserScrollBehavior(),
+                        child: view,
                       );
                     },
                   ),
@@ -1068,3 +1108,15 @@ class _TerminalPageState extends State<TerminalPage> {
 }
 
 enum _MenuAction { paste, sendFile, fetchFile, settings, disconnect }
+
+// Disables user-driven scrolling on any descendant Scrollable while keeping
+// programmatic scrolls (e.g. xterm's _scrollToBottom) working. We use this
+// to take the inner Scrollable inside TerminalView out of the gesture arena
+// when the remote owns mouse input.
+class _NoUserScrollBehavior extends ScrollBehavior {
+  const _NoUserScrollBehavior();
+
+  @override
+  ScrollPhysics getScrollPhysics(BuildContext context) =>
+      const NeverScrollableScrollPhysics();
+}

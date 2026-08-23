@@ -51,7 +51,8 @@ class NotificationService {
     _actionPort = port;
     _actionSub = port.listen(_handleActionMessage);
 
-    const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const androidInit =
+        AndroidInitializationSettings('@drawable/ic_notification');
     await _plugin.initialize(
       settings: const InitializationSettings(android: androidInit),
       onDidReceiveNotificationResponse: _handleResponse,
